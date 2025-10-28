@@ -77,6 +77,7 @@ impl<'de> Deserialize<'de> for LanguageId {
         let static_str = match s.as_str() {
             "rust" => "rust",
             "python" => "python",
+            "ruby" => "ruby",
             "javascript" => "javascript",
             "typescript" => "typescript",
             "php" => "php",
@@ -372,6 +373,7 @@ fn initialize_registry(registry: &mut LanguageRegistry) {
     super::rust::register(registry);
     super::python::register(registry);
     super::php::register(registry);
+    super::ruby::register(registry);
     super::typescript::register(registry);
     super::go::register(registry);
     super::c::register(registry);

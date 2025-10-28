@@ -168,6 +168,11 @@ impl ParserFactory {
                 let parser = GdscriptParser::new().map_err(IndexError::General)?;
                 Ok(Box::new(parser))
             }
+            Language::Ruby => {
+                let parser = crate::parsing::ruby::RubyParser::new()
+                    .map_err(|e| IndexError::General(e.to_string()))?;
+                Ok(Box::new(parser))
+            }
         }
     }
 
@@ -275,6 +280,14 @@ impl ParserFactory {
                 ParserWithBehavior {
                     parser: Box::new(parser),
                     behavior: Box::new(GdscriptBehavior::new()),
+                }
+            }
+            Language::Ruby => {
+                let parser = crate::parsing::ruby::RubyParser::new()
+                    .map_err(|e| IndexError::General(e.to_string()))?;
+                ParserWithBehavior {
+                    parser: Box::new(parser),
+                    behavior: Box::new(crate::parsing::ruby::RubyBehavior::new()),
                 }
             }
         };

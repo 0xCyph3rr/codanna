@@ -14,12 +14,13 @@ pub mod parser;
 pub mod php;
 pub mod python;
 pub mod registry;
+pub mod ruby;
 pub mod resolution;
 pub mod rust;
 pub mod typescript;
 
 pub use c::{CBehavior, CParser};
-pub use context::{ParserContext, ScopeType};
+pub use context::{ParserContext, ScopeType, Visibility};
 pub use cpp::{CppBehavior, CppParser};
 pub use csharp::{CSharpBehavior, CSharpParser};
 pub use factory::{ParserFactory, ParserWithBehavior};
@@ -35,6 +36,7 @@ pub use parser::{
 };
 pub use php::{PhpBehavior, PhpParser};
 pub use python::{PythonBehavior, PythonParser};
+pub use ruby::{RubyBehavior, RubyParser};
 pub use registry::{LanguageDefinition, LanguageId, LanguageRegistry, RegistryError, get_registry};
 pub use resolution::{
     GenericInheritanceResolver, GenericResolutionContext, InheritanceResolver, ResolutionScope,

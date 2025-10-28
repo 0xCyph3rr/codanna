@@ -1,0 +1,152 @@
+=== Ruby Language ABI-15 COMPREHENSIVE NODE MAPPING ===
+  Generated: 2025-10-28 18:11:56 UTC
+  ABI Version: 15
+  Node kind count: 87
+
+=== MODULE AND CLASS NODES ===
+  ✓ module                              -> ID: 27
+  ✓ class                               -> ID: 25
+  ✓ singleton_class                     -> ID: 183
+  ✓ superclass                          -> ID: 182
+  ✓ body_statement                      -> ID: 249
+
+=== METHOD DEFINITION NODES ===
+  ✓ method                              -> ID: 163
+  ✓ singleton_method                    -> ID: 164
+  ✓ method_parameters                   -> ID: 169
+  ✓ block_parameters                    -> ID: 171
+  ✓ optional_parameter                  -> ID: 180
+  ✓ keyword_parameter                   -> ID: 179
+  ✗ hash_splat_parameter                NOT FOUND
+  ✓ splat_parameter                     -> ID: 175
+  ✓ block_parameter                     -> ID: 178
+
+=== VARIABLE AND CONSTANT NODES ===
+  ✓ assignment                          -> ID: 276
+  ✓ operator_assignment                 -> ID: 278
+  ✓ constant                            -> ID: 117
+  ✓ instance_variable                   -> ID: 120
+  ✓ class_variable                      -> ID: 121
+  ✓ global_variable                     -> ID: 122
+  ✓ identifier                          -> ID: 1
+
+=== BLOCK AND LAMBDA NODES ===
+  ✓ block                               -> ID: 275
+  ✓ do_block                            -> ID: 274
+  ✓ lambda                              -> ID: 325
+  ✗ begin_block                         NOT FOUND
+  ✗ end_block                           NOT FOUND
+
+=== CONTROL FLOW NODES ===
+  ✓ if                                  -> ID: 34
+  ✓ unless                              -> ID: 35
+  ✗ case                                NOT FOUND
+  ✗ when                                NOT FOUND
+  ✓ else                                -> ID: 54
+  ✗ elsif                               NOT FOUND
+  ✓ if_modifier                         -> ID: 195
+  ✓ unless_modifier                     -> ID: 196
+
+=== LOOP NODES ===
+  ✗ while                               NOT FOUND
+  ✗ until                               NOT FOUND
+  ✗ for                                 NOT FOUND
+  ✗ while_modifier                      NOT FOUND
+  ✗ until_modifier                      NOT FOUND
+  ✗ break                               NOT FOUND
+  ✗ next                                NOT FOUND
+  ✗ redo                                NOT FOUND
+  ✗ retry                               NOT FOUND
+
+=== EXCEPTION HANDLING NODES ===
+  ✗ begin                               NOT FOUND
+  ✗ rescue                              NOT FOUND
+  ✗ rescue_modifier                     NOT FOUND
+  ✗ ensure                              NOT FOUND
+  ✗ raise                               NOT FOUND
+
+=== METHOD CALL NODES ===
+  ✓ call                                -> ID: 265
+  ✗ method_call                         NOT FOUND
+  ✓ argument_list                       -> ID: 267
+  ✓ block_argument                      -> ID: 273
+  ✗ keyword_argument                    NOT FOUND
+
+=== SYMBOL AND STRING NODES ===
+  ✗ symbol                              NOT FOUND
+  ✓ string                              -> ID: 314
+  ✓ interpolation                       -> ID: 313
+  ✗ escape_sequence                     NOT FOUND
+  ✗ heredoc_beginning                   NOT FOUND
+  ✗ heredoc_body                        NOT FOUND
+  ✗ heredoc_end                         NOT FOUND
+
+=== ATTRIBUTE NODES ===
+  ✗ attr_reader                         NOT FOUND
+  ✗ attr_writer                         NOT FOUND
+  ✗ attr_accessor                       NOT FOUND
+
+=== ALIAS AND MODULE MANIPULATION ===
+  ✗ alias                               NOT FOUND
+  ✗ undef                               NOT FOUND
+  ✗ include                             NOT FOUND
+  ✗ extend                              NOT FOUND
+  ✗ prepend                             NOT FOUND
+
+=== UNCATEGORIZED NODES ===
+  ✓ !                                   -> ID: 95
+  ✓ "                                   -> ID: 131
+  ✓ #{                                  -> ID: 124
+  ✓ &                                   -> ID: 23
+  ✓ &&                                  -> ID: 78
+  ✓ (                                   -> ID: 9
+  ✓ )                                   -> ID: 10
+  ✓ *                                   -> ID: 20
+  ✓ +                                   -> ID: 84
+  ✓ +=                                  -> ID: 60
+  ✓ ,                                   -> ID: 16
+  ✓ ->                                  -> ID: 127
+  ✓ .                                   -> ID: 11
+  ✓ :                                   -> ID: 24
+  ✓ ::                                  -> ID: 12
+  ✓ <                                   -> ID: 26
+  ✓ <<                                  -> ID: 79
+  ✓ =                                   -> ID: 15
+  ✓ ==                                  -> ID: 87
+  ✓ >=                                  -> ID: 83
+  ✓ [                                   -> ID: 44
+  ✓ ]                                   -> ID: 45
+  ✓ array                               -> ID: 322
+  ✓ binary                              -> ID: 282
+  ✓ block_body                          -> ID: 158
+  ✓ comment                             -> ID: 107
+  ✓ def                                 -> ID: 8
+  ✓ do                                  -> ID: 40
+  ✓ element_reference                   -> ID: 259
+  ✓ end                                 -> ID: 13
+  ✓ false                               -> ID: 116
+  ✓ hash                                -> ID: 323
+  ✓ hash_key_symbol                     -> ID: 150
+  ✓ integer                             -> ID: 108
+  ✓ lambda_parameters                   -> ID: 350
+  ✓ nil                                 -> ID: 22
+  ✓ operator                            -> ID: 300
+  ✓ pair                                -> ID: 324
+  ✓ program                             -> ID: 157
+  ✓ return                              -> ID: 28
+  ✓ scope_resolution                    -> ID: 260
+  ✓ self                                -> ID: 114
+  ✓ simple_symbol                       -> ID: 130
+  ✓ string_content                      -> ID: 138
+  ✓ super                               -> ID: 113
+  ✓ then                                -> ID: 243
+  ✓ true                                -> ID: 115
+  ✓ unary                               -> ID: 284
+  ✓ yield                               -> ID: 29
+  ✓ {                                   -> ID: 5
+  ✓ |                                   -> ID: 17
+  ✓ ||                                  -> ID: 77
+  ✓ ||=                                 -> ID: 65
+  ✓ }                                   -> ID: 6
+
+Legend: ✓ = found in file, ○ = in grammar but not in file, ✗ = not in grammar

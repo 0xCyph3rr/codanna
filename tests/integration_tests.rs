@@ -48,3 +48,12 @@ mod test_external_import_resolution;
 
 #[path = "integration/test_gdscript_mcp.rs"]
 mod test_gdscript_mcp;
+
+#[path = "integration/test_ruby_symbol_extraction.rs"]
+mod test_ruby_symbol_extraction;
+
+#[path = "integration/test_ruby_cross_module_resolution.rs"]
+mod test_ruby_cross_module_resolution;
+
+#[path = "integration/test_ruby_dependency_tracking.rs"]
+mod test_ruby_dependency_tracking;

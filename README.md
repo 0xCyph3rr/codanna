@@ -72,12 +72,42 @@ codanna mcp semantic_search_docs query:"where do we resolve symbol references" l
 
 **Result**: 3 relevant functions in 0.16s with exact file locations and signatures.
 
+### Ruby-Specific Usage
+
+```bash
+# Index Ruby project
+codanna index lib app --progress
+
+# Find Ruby classes with inheritance
+codanna mcp find_symbol User --json | jq '.data[]?[0] | .name, .file_path'
+
+# Query Ruby mixins and modules
+codanna mcp semantic_search_docs query:"modules with authentication or caching" limit:5
+
+# Trace Ruby method calls (including attr_accessor)
+codanna mcp get_calls authenticate --json
+
+# Find where modules are included/extended
+codanna mcp find_callers Authentication::OAuth --json
+
+# Analyze impact of changing a Ruby class
+codanna mcp analyze_impact lib/models/user.rb
+```
+
+**Ruby Features Supported**:
+- Classes, modules, and inheritance tracking
+- Mixin resolution (include/extend/prepend)
+- Metaprogramming constructs (attr_accessor, attr_reader, attr_writer)
+- Method visibility (public/private/protected)
+- Nested classes and modules
+- Singleton methods and class methods
+
 ## Features
 
 - **Fast parsing** - Tree-sitter AST (same as GitHub code navigator)
 - **Semantic search** - Natural language queries that understand your code
 - **Relationship tracking** - Call graphs, implementations, dependencies
-- **Multi-language** - Rust, Python, TypeScript, Go, PHP, C, C++
+- **Multi-language** - Rust, Python, TypeScript, Go, PHP, C, C++, Ruby
 - **MCP protocol** - Native integration with Claude and other AI assistants
 - **Plugin system** - Project-scoped commands, agents, and scripts
 - **<10ms lookups** - Memory-mapped caches for instant responses

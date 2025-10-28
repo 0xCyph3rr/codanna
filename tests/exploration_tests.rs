@@ -13,3 +13,9 @@ mod abi15_exploration;
 
 #[path = "exploration/abi15_grammar_audit.rs"]
 mod abi15_grammar_audit;
+
+#[path = "exploration/ruby_grammar_gen.rs"]
+mod ruby_grammar_gen;
+
+#[path = "exploration/ruby_comprehensive_analysis.rs"]
+mod ruby_comprehensive_analysis;
