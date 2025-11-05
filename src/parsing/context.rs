@@ -6,6 +6,23 @@
 use crate::symbol::ScopeContext;
 use crate::types::SymbolKind;
 
+/// Visibility modifiers for methods and attributes
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Visibility {
+    /// Public visibility (default in Ruby, accessible from anywhere)
+    Public,
+    /// Private visibility (only accessible within the same object)
+    Private,
+    /// Protected visibility (accessible within the same class and subclasses)
+    Protected,
+}
+
+impl Default for Visibility {
+    fn default() -> Self {
+        Visibility::Public
+    }
+}
+
 /// Scope types that parsers track during AST traversal
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ScopeType {
@@ -49,6 +66,8 @@ pub struct ParserContext {
     current_class: Option<String>,
     /// Current function name (if inside a function)
     current_function: Option<String>,
+    /// Current visibility state for methods (for Ruby, PHP, etc.)
+    visibility_state: Visibility,
 }
 
 impl Default for ParserContext {
@@ -64,6 +83,7 @@ impl ParserContext {
             scope_stack: vec![ScopeType::Module],
             current_class: None,
             current_function: None,
+            visibility_state: Visibility::default(),
         }
     }
 
@@ -206,6 +226,21 @@ impl ParserContext {
     /// Create a scope context for a global symbol
     pub fn global_scope_context() -> ScopeContext {
         ScopeContext::Global
+    }
+
+    /// Set the current visibility state
+    pub fn set_visibility(&mut self, visibility: Visibility) {
+        self.visibility_state = visibility;
+    }
+
+    /// Get the current visibility state
+    pub fn current_visibility(&self) -> Visibility {
+        self.visibility_state
+    }
+
+    /// Reset visibility to public (default state)
+    pub fn reset_visibility(&mut self) {
+        self.visibility_state = Visibility::Public;
     }
 }
 

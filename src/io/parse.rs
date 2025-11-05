@@ -260,6 +260,7 @@ pub fn execute_parse(
         Language::Cpp => tree_sitter_cpp::LANGUAGE.into(),
         Language::CSharp => tree_sitter_c_sharp::LANGUAGE.into(),
         Language::Gdscript => tree_sitter_gdscript::LANGUAGE.into(),
+        Language::Ruby => tree_sitter_ruby::LANGUAGE.into(),
     };
 
     parser

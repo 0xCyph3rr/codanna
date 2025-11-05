@@ -121,6 +121,17 @@ pub struct LanguageConfig {
     pub config_files: Vec<PathBuf>,
 }
 
+impl Default for LanguageConfig {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            extensions: Vec::new(),
+            parser_options: HashMap::new(),
+            config_files: Vec::new(),
+        }
+    }
+}
+
 #[derive(Debug, Deserialize, Serialize, Clone)]
 pub struct McpConfig {
     /// Maximum context size in bytes

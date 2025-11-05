@@ -1,0 +1,201 @@
+# Ruby Grammar Analysis
+
+*Generated: 2025-11-05 16:11:04 UTC*
+
+## Statistics
+- Total nodes in grammar JSON: 134
+- Nodes found in comprehensive.rb: 89
+- Nodes handled by parser: 6
+- Symbol kinds extracted: 4
+
+## ✅ Successfully Handled Nodes
+These nodes are in examples and handled by parser:
+- assignment
+- call
+- class
+- method
+- module
+- singleton_method
+
+### Special Note: Ruby Mixin Tracking (include/extend/prepend)
+
+**IMPORTANT**: Ruby mixins (include, extend, prepend) are NOT distinct node types in the tree-sitter-ruby grammar. They are implemented as `call` nodes (kind_id: 265) with identifier children having names 'include', 'extend', or 'prepend'.
+
+The parser tracks mixin relationships through `find_implementations()` by:
+1. Detecting `call` nodes where method field matches 'include'/'extend'/'prepend'
+2. Extracting module names from the argument_list (supports both simple names like `Loggable` and qualified names like `Features::Security`)
+3. Tracking the implementer class/module via class_stack during AST traversal
+4. Returning tuples of (implementer_name, module_name, range)
+
+This is why the AUDIT_REPORT.md correctly shows include/extend/prepend as "❌ not found" - they don't exist as node types, but their functionality is fully implemented via call node inspection.
+
+## ⚠️ Implementation Gaps
+These nodes appear in comprehensive.rb but aren't handled:
+- !
+- "
+- #{
+- &
+- &&
+- (
+- )
+- *
+- +
+- +=
+- ,
+- -
+- ->
+- .
+- :
+- ::
+- <
+- <<
+- =
+- ==
+- >=
+- [
+- ]
+- argument_list
+- array
+- binary
+- block
+- block_argument
+- block_body
+- block_parameter
+- block_parameters
+- body_statement
+- class_variable
+- comment
+- constant
+- def
+- do
+- do_block
+- element_reference
+- else
+- end
+- false
+- float
+- global_variable
+- hash
+- hash_key_symbol
+- identifier
+- if
+- if_modifier
+- instance_variable
+- integer
+- interpolation
+- keyword_parameter
+- lambda
+- lambda_parameters
+- method_parameters
+- nil
+- operator
+- operator_assignment
+- optional_parameter
+- pair
+- program
+- return
+- scope_resolution
+- self
+- simple_symbol
+- singleton_class
+- splat_parameter
+- string
+- string_content
+- super
+- superclass
+- then
+- true
+- unary
+- unless
+- unless_modifier
+- yield
+- {
+- |
+- ||
+- ||=
+- }
+
+## 📝 Missing from Examples
+These grammar nodes aren't in comprehensive.rb:
+- alias
+- alternative_pattern
+- array_pattern
+- as_pattern
+- bare_string
+- bare_symbol
+- begin
+- begin_block
+- break
+- case
+- case_match
+- chained_string
+- character
+- complex
+- conditional
+- delimited_symbol
+- destructured_left_assignment
+- destructured_parameter
+- elsif
+- empty_statement
+- encoding
+- end_block
+- ensure
+- escape_sequence
+- exception_variable
+- exceptions
+- expression_reference_pattern
+- file
+- find_pattern
+- for
+- forward_argument
+- forward_parameter
+- hash_pattern
+- hash_splat_argument
+- hash_splat_nil
+- hash_splat_parameter
+- heredoc_beginning
+- heredoc_body
+- heredoc_content
+- heredoc_end
+- if_guard
+- in
+- in_clause
+- keyword_pattern
+- left_assignment_list
+- line
+- match_pattern
+- next
+- parenthesized_pattern
+- parenthesized_statements
+- pattern
+- range
+- rational
+- redo
+- regex
+- rescue
+- rescue_modifier
+- rest_assignment
+- retry
+- right_assignment_list
+- setter
+- splat_argument
+- string_array
+- subshell
+- symbol_array
+- test_pattern
+- undef
+- uninterpreted
+- unless_guard
+- until
+- until_modifier
+- variable_reference_pattern
+- when
+- while
+- while_modifier
+
+## 🎯 Symbol Kinds Extracted
+- Class
+- Constant
+- Method
+- Module
+
