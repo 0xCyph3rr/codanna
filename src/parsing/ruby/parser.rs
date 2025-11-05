@@ -1105,6 +1105,119 @@ impl RubyParser {
             self.find_mixins_in_node(child, code, implementations, class_stack);
         }
     }
+
+    /// Recursively find require/require_relative statements in the AST
+    ///
+    /// Ruby imports are represented as 'call' nodes with method names:
+    /// - "require": Load from $LOAD_PATH (e.g., `require 'json'`)
+    /// - "require_relative": Load relative to current file (e.g., `require_relative '../lib/utils'`)
+    fn find_imports_in_node(
+        &mut self,
+        node: Node,
+        code: &str,
+        file_id: FileId,
+        imports: &mut Vec<Import>,
+    ) {
+        match node.kind() {
+            "call" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Check if this is a require or require_relative call
+                if let Some(method_node) = node.child_by_field_name("method") {
+                    let method_text = &code[method_node.byte_range()];
+
+                    if method_text == "require" || method_text == "require_relative" {
+                        // Extract the path argument
+                        if let Some(path) = self.extract_require_path(node, code) {
+                            imports.push(Import {
+                                path: path.to_string(),
+                                alias: None,
+                                file_id,
+                                is_glob: false,
+                                is_type_only: false,
+                            });
+                        }
+                    }
+                }
+                // Continue recursing through children
+                self.process_children_for_imports(node, code, file_id, imports);
+            }
+            _ => {
+                // Recurse through all other node types
+                self.process_children_for_imports(node, code, file_id, imports);
+            }
+        }
+    }
+
+    /// Extract the path argument from require/require_relative call
+    ///
+    /// Handles:
+    /// - Single quoted strings: `require 'json'`
+    /// - Double quoted strings: `require "utils"`
+    /// - Parenthesized calls: `require('json')`
+    fn extract_require_path<'a>(&self, call_node: Node, code: &'a str) -> Option<&'a str> {
+        // Try to get arguments field first
+        if let Some(args_node) = call_node.child_by_field_name("arguments") {
+            // Look for string argument inside arguments node
+            let mut cursor = args_node.walk();
+            for child in args_node.children(&mut cursor) {
+                if child.kind() == "string" {
+                    // Extract string content (without quotes)
+                    return self.extract_string_content(child, code);
+                }
+            }
+        }
+
+        // Fallback: some require statements might have string as direct child
+        // (e.g., `require 'json'` without parentheses)
+        let mut cursor = call_node.walk();
+        for child in call_node.children(&mut cursor) {
+            if child.kind() == "string" {
+                return self.extract_string_content(child, code);
+            }
+        }
+
+        None
+    }
+
+    /// Extract content from a string node (without quotes)
+    ///
+    /// Handles:
+    /// - String with string_content child: `"text"` → "text"
+    /// - Fallback: strip quotes manually if no string_content node
+    fn extract_string_content<'a>(&self, string_node: Node, code: &'a str) -> Option<&'a str> {
+        // Try to find string_content child (the actual text without quotes)
+        let mut cursor = string_node.walk();
+        for child in string_node.children(&mut cursor) {
+            if child.kind() == "string_content" {
+                return Some(&code[child.byte_range()]);
+            }
+        }
+
+        // Fallback: manually strip quotes if no string_content node
+        let full_text = &code[string_node.byte_range()];
+        if full_text.len() >= 2 {
+            // Strip first and last character (quotes)
+            let stripped = &full_text[1..full_text.len() - 1];
+            if !stripped.is_empty() {
+                return Some(stripped);
+            }
+        }
+
+        None
+    }
+
+    /// Process child nodes for import extraction
+    fn process_children_for_imports(
+        &mut self,
+        node: Node,
+        code: &str,
+        file_id: FileId,
+        imports: &mut Vec<Import>,
+    ) {
+        for child in node.children(&mut node.walk()) {
+            self.find_imports_in_node(child, code, file_id, imports);
+        }
+    }
 }
 
 impl NodeTracker for RubyParser {
@@ -1247,9 +1360,17 @@ impl LanguageParser for RubyParser {
         Vec::new()
     }
 
-    fn find_imports(&mut self, _code: &str, _file_id: FileId) -> Vec<Import> {
-        // TODO: Phase 2 - Ruby uses require/require_relative
-        Vec::new()
+    fn find_imports(&mut self, code: &str, file_id: FileId) -> Vec<Import> {
+        let tree = match self.parser.parse(code, None) {
+            Some(tree) => tree,
+            None => return Vec::new(),
+        };
+
+        let root_node = tree.root_node();
+        let mut imports = Vec::new();
+
+        self.find_imports_in_node(root_node, code, file_id, &mut imports);
+        imports
     }
 }
 
@@ -2925,5 +3046,124 @@ end
             implementers.len() >= 10,
             "Should find mixins in at least 10 different classes"
         );
+    }
+
+    #[test]
+    fn test_require_relative_extraction() {
+        let code = r#"
+require_relative '../lib/utils'
+require_relative 'helpers/formatter'
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+
+        let imports = parser.find_imports(code, file_id);
+
+        assert_eq!(imports.len(), 2, "Should find 2 require_relative statements");
+
+        // Verify first import
+        assert_eq!(imports[0].path, "../lib/utils");
+        assert_eq!(imports[0].file_id, file_id);
+        assert!(!imports[0].is_glob);
+        assert!(!imports[0].is_type_only);
+
+        // Verify second import
+        assert_eq!(imports[1].path, "helpers/formatter");
+        assert_eq!(imports[1].file_id, file_id);
+    }
+
+    #[test]
+    fn test_require_extraction() {
+        let code = r#"
+require 'json'
+require "active_support"
+require('nokogiri')
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+
+        let imports = parser.find_imports(code, file_id);
+
+        assert_eq!(imports.len(), 3, "Should find 3 require statements");
+
+        // Verify imports
+        assert_eq!(imports[0].path, "json");
+        assert_eq!(imports[1].path, "active_support");
+        assert_eq!(imports[2].path, "nokogiri");
+    }
+
+    #[test]
+    fn test_mixed_require_statements() {
+        let code = r#"
+require 'json'
+require_relative '../config/settings'
+
+class MyClass
+  require 'set'
+  require_relative 'my_class/helpers'
+
+  def some_method
+    require 'tempfile'
+  end
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+
+        let imports = parser.find_imports(code, file_id);
+
+        assert_eq!(imports.len(), 5, "Should find all 5 require statements");
+
+        // Verify paths
+        let paths: Vec<&str> = imports.iter().map(|i| i.path.as_str()).collect();
+        assert!(paths.contains(&"json"));
+        assert!(paths.contains(&"../config/settings"));
+        assert!(paths.contains(&"set"));
+        assert!(paths.contains(&"my_class/helpers"));
+        assert!(paths.contains(&"tempfile"));
+    }
+
+    #[test]
+    fn test_require_with_various_quote_styles() {
+        let code = r#"
+require 'single_quoted'
+require "double_quoted"
+require('parenthesized_single')
+require("parenthesized_double")
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+
+        let imports = parser.find_imports(code, file_id);
+
+        assert_eq!(imports.len(), 4, "Should handle all quote styles");
+
+        let paths: Vec<&str> = imports.iter().map(|i| i.path.as_str()).collect();
+        assert!(paths.contains(&"single_quoted"));
+        assert!(paths.contains(&"double_quoted"));
+        assert!(paths.contains(&"parenthesized_single"));
+        assert!(paths.contains(&"parenthesized_double"));
+    }
+
+    #[test]
+    fn test_no_imports() {
+        let code = r#"
+class User
+  def initialize(name)
+    @name = name
+  end
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+
+        let imports = parser.find_imports(code, file_id);
+
+        assert_eq!(imports.len(), 0, "Should find no imports");
     }
 }

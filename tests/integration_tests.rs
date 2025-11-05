@@ -57,3 +57,6 @@ mod test_ruby_cross_module_resolution;
 
 #[path = "integration/test_ruby_dependency_tracking.rs"]
 mod test_ruby_dependency_tracking;
+
+#[path = "integration/test_ruby_cross_file_constant_resolution.rs"]
+mod test_ruby_cross_file_constant_resolution;
