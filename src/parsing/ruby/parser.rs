@@ -897,6 +897,77 @@ impl RubyParser {
 
         Some(method_call)
     }
+
+    /// Find constant/module uses in the AST (e.g., ConstantName.method_call patterns)
+    fn find_constant_uses_in_node<'a>(
+        &mut self,
+        node: Node,
+        code: &'a str,
+        uses: &mut Vec<(&'a str, &'a str, Range)>,
+        current_function: &mut Option<&'a str>,
+    ) {
+        match node.kind() {
+            "method" | "singleton_method" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                if let Some(name) = self.extract_method_name(node, code) {
+                    let old_function = *current_function;
+                    *current_function = Some(name);
+                    self.process_children_for_constant_uses(node, code, uses, current_function);
+                    *current_function = old_function;
+                }
+            }
+            "call" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Extract receiver from call nodes (e.g., User.find → "User")
+                if let Some(receiver_node) = node.child_by_field_name("receiver") {
+                    let receiver_text = &code[receiver_node.byte_range()];
+
+                    // Check if receiver is a constant (starts with uppercase)
+                    if let Some(first_char) = receiver_text.chars().next() {
+                        if first_char.is_ascii_uppercase() {
+                            let caller = (*current_function).unwrap_or("<module>");
+                            let range = self.node_to_range(receiver_node);
+                            uses.push((caller, receiver_text, range));
+                        }
+                    }
+                }
+                self.process_children_for_constant_uses(node, code, uses, current_function);
+            }
+            "scope_resolution" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Handle Module::Class patterns - extract the left side (module/constant name)
+                if let Some(scope_node) = node.child_by_field_name("scope") {
+                    let scope_text = &code[scope_node.byte_range()];
+
+                    // Check if scope is a constant
+                    if let Some(first_char) = scope_text.chars().next() {
+                        if first_char.is_ascii_uppercase() {
+                            let caller = (*current_function).unwrap_or("<module>");
+                            let range = self.node_to_range(scope_node);
+                            uses.push((caller, scope_text, range));
+                        }
+                    }
+                }
+                self.process_children_for_constant_uses(node, code, uses, current_function);
+            }
+            _ => {
+                self.process_children_for_constant_uses(node, code, uses, current_function);
+            }
+        }
+    }
+
+    /// Process child nodes for constant uses
+    fn process_children_for_constant_uses<'a>(
+        &mut self,
+        node: Node,
+        code: &'a str,
+        uses: &mut Vec<(&'a str, &'a str, Range)>,
+        current_function: &mut Option<&'a str>,
+    ) {
+        for child in node.children(&mut node.walk()) {
+            self.find_constant_uses_in_node(child, code, uses, current_function);
+        }
+    }
 }
 
 impl NodeTracker for RubyParser {
@@ -1015,9 +1086,19 @@ impl LanguageParser for RubyParser {
         Vec::new()
     }
 
-    fn find_uses<'a>(&mut self, _code: &'a str) -> Vec<(&'a str, &'a str, Range)> {
-        // TODO: Phase 5 - Type usage tracking
-        Vec::new()
+    fn find_uses<'a>(&mut self, code: &'a str) -> Vec<(&'a str, &'a str, Range)> {
+        let tree = match self.parser.parse(code, None) {
+            Some(tree) => tree,
+            None => return Vec::new(),
+        };
+
+        let root = tree.root_node();
+        let mut uses = Vec::new();
+        let mut current_function = None;
+
+        self.find_constant_uses_in_node(root, code, &mut uses, &mut current_function);
+
+        uses
     }
 
     fn find_defines<'a>(&mut self, _code: &'a str) -> Vec<(&'a str, &'a str, Range)> {
@@ -1735,5 +1816,393 @@ end
         let simple_doc = simple_method.unwrap().doc_comment.as_ref().map(|s| s.as_ref());
         assert!(simple_doc.is_some(), "simple_method should have doc comment");
         assert_eq!(simple_doc.unwrap(), "Simple single-line comment", "Should match exact comment text");
+    }
+
+    #[test]
+    fn test_find_uses() {
+        let code = r#"
+class User
+  def initialize(name)
+    @name = name
+  end
+end
+
+def test_method
+  user = User.new("Alice")
+  result = DataProcessor.process([1, 2, 3])
+  admin = Admin.find(1)
+  config = Configuration.instance
+end
+
+# Top-level usage
+article = Article.create(title: "Test")
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let uses = parser.find_uses(code);
+
+        println!("\n=== Found {} constant uses ===", uses.len());
+        for (caller, constant, range) in &uses {
+            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+        }
+
+        // Verify we found the constant uses
+        assert!(uses.len() > 0, "Should find at least one constant use");
+
+        // Check for specific patterns
+        let user_uses: Vec<_> = uses.iter()
+            .filter(|(_, constant, _)| *constant == "User")
+            .collect();
+        assert!(user_uses.len() > 0, "Should find User constant usage");
+
+        let dataprocessor_uses: Vec<_> = uses.iter()
+            .filter(|(_, constant, _)| *constant == "DataProcessor")
+            .collect();
+        assert!(dataprocessor_uses.len() > 0, "Should find DataProcessor constant usage");
+
+        let admin_uses: Vec<_> = uses.iter()
+            .filter(|(_, constant, _)| *constant == "Admin")
+            .collect();
+        assert!(admin_uses.len() > 0, "Should find Admin constant usage");
+
+        // Verify caller context
+        let test_method_uses: Vec<_> = uses.iter()
+            .filter(|(caller, _, _)| *caller == "test_method")
+            .collect();
+        assert!(test_method_uses.len() >= 3, "test_method should use at least 3 constants");
+
+        let module_uses: Vec<_> = uses.iter()
+            .filter(|(caller, _, _)| *caller == "<module>")
+            .collect();
+        assert!(module_uses.len() > 0, "Should find top-level constant usage");
+    }
+
+    #[test]
+    fn test_find_uses_with_scope_resolution() {
+        let code = r#"
+module MyApp
+  class User
+  end
+end
+
+def test_scope
+  user = MyApp::User.new
+  parser = JSON::Parser.new
+  result = ActiveRecord::Base.connection
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let uses = parser.find_uses(code);
+
+        println!("\n=== Scope Resolution Test - Found {} constant uses ===", uses.len());
+        for (caller, constant, range) in &uses {
+            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+        }
+
+        // Verify we found scope resolution patterns
+        assert!(uses.len() > 0, "Should find constant uses with scope resolution");
+
+        // Check for MyApp module reference
+        let myapp_uses: Vec<_> = uses.iter()
+            .filter(|(_, constant, _)| *constant == "MyApp")
+            .collect();
+        assert!(myapp_uses.len() > 0, "Should find MyApp in MyApp::User pattern");
+
+        // Check for JSON module reference
+        let json_uses: Vec<_> = uses.iter()
+            .filter(|(_, constant, _)| *constant == "JSON")
+            .collect();
+        assert!(json_uses.len() > 0, "Should find JSON in JSON::Parser pattern");
+
+        // Check for ActiveRecord module reference
+        let ar_uses: Vec<_> = uses.iter()
+            .filter(|(_, constant, _)| *constant == "ActiveRecord")
+            .collect();
+        assert!(ar_uses.len() > 0, "Should find ActiveRecord in ActiveRecord::Base pattern");
+    }
+
+    #[test]
+    fn test_find_uses_chained_methods() {
+        let code = r#"
+def test_chaining
+  # Chained method calls - should extract receiver only once
+  user = User.find(1).update(name: "test")
+  result = DataProcessor.process(data).transform.save
+  admin = Admin.where(active: true).first.reload
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let uses = parser.find_uses(code);
+
+        println!("\n=== Chained Methods Test - Found {} constant uses ===", uses.len());
+        for (caller, constant, range) in &uses {
+            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+        }
+
+        // Should find constant receivers even in chained calls
+        let user_uses: Vec<_> = uses.iter()
+            .filter(|(_, constant, _)| *constant == "User")
+            .collect();
+        assert!(user_uses.len() > 0, "Should find User in chained call");
+
+        let dp_uses: Vec<_> = uses.iter()
+            .filter(|(_, constant, _)| *constant == "DataProcessor")
+            .collect();
+        assert!(dp_uses.len() > 0, "Should find DataProcessor in chained call");
+    }
+
+    #[test]
+    fn test_find_uses_nested_calls() {
+        let code = r#"
+def test_nested
+  # Nested constant usage - should find all constants
+  user = User.find(Admin.first.id)
+  result = Processor.run(Config.load(Settings.default))
+  data = Cache.fetch(Database.connection.query("SELECT * FROM users"))
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let uses = parser.find_uses(code);
+
+        println!("\n=== Nested Calls Test - Found {} constant uses ===", uses.len());
+        for (caller, constant, range) in &uses {
+            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+        }
+
+        // Should find all nested constants
+        let constants_found: Vec<&str> = uses.iter()
+            .map(|(_, constant, _)| *constant)
+            .collect();
+
+        assert!(constants_found.contains(&"User"), "Should find User");
+        assert!(constants_found.contains(&"Admin"), "Should find Admin");
+        assert!(constants_found.contains(&"Processor"), "Should find Processor");
+        assert!(constants_found.contains(&"Config"), "Should find Config");
+        assert!(constants_found.contains(&"Settings"), "Should find Settings");
+        assert!(constants_found.contains(&"Cache"), "Should find Cache");
+        assert!(constants_found.contains(&"Database"), "Should find Database");
+    }
+
+    #[test]
+    fn test_find_uses_nil_receivers() {
+        let code = r#"
+def test_nil_receivers
+  # Method calls without receivers or with lowercase receivers
+  result = process(data)
+  value = calculate()
+  item = self.fetch
+  data = @processor.run
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let uses = parser.find_uses(code);
+
+        println!("\n=== Nil Receivers Test - Found {} constant uses ===", uses.len());
+        for (caller, constant, range) in &uses {
+            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+        }
+
+        // Should find NO constant uses (all receivers are nil, self, or lowercase)
+        assert_eq!(uses.len(), 0, "Should not find any constant uses with nil/lowercase receivers");
+    }
+
+    #[test]
+    fn test_find_uses_multi_level_scope() {
+        let code = r#"
+def test_multi_level
+  # Multi-level scope resolution
+  user = App::Models::User.create
+  parser = Data::Processing::JSON::Parser.new
+  config = System::Config::Database::Settings.load
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let uses = parser.find_uses(code);
+
+        println!("\n=== Multi-Level Scope Test - Found {} constant uses ===", uses.len());
+        for (caller, constant, range) in &uses {
+            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+        }
+
+        // Should find module/constant references at each level
+        let constants_found: Vec<&str> = uses.iter()
+            .map(|(_, constant, _)| *constant)
+            .collect();
+
+        assert!(constants_found.contains(&"App"), "Should find App");
+        assert!(constants_found.contains(&"Data"), "Should find Data");
+        assert!(constants_found.contains(&"System"), "Should find System");
+    }
+
+    #[test]
+    fn test_find_uses_mixed_case() {
+        let code = r#"
+def test_mixed_case
+  # Only uppercase-starting identifiers are constants
+  constant = ConstantName.method
+  variable = variableName.method
+  snake = snake_case.method
+  camel = camelCase.method
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let uses = parser.find_uses(code);
+
+        println!("\n=== Mixed Case Test - Found {} constant uses ===", uses.len());
+        for (caller, constant, range) in &uses {
+            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+        }
+
+        // Should only find ConstantName (uppercase start)
+        assert_eq!(uses.len(), 1, "Should find exactly one constant use");
+        let (_, constant, _) = uses[0];
+        assert_eq!(constant, "ConstantName", "Should only find ConstantName");
+    }
+
+    #[test]
+    fn test_find_uses_function_context() {
+        let code = r#"
+# Top-level
+TopLevel.call
+
+class MyClass
+  # Class body
+  ClassLevel.call
+
+  def instance_method
+    InstanceLevel.call
+  end
+
+  def self.class_method
+    ClassMethodLevel.call
+  end
+end
+
+def standalone_function
+  StandaloneLevel.call
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let uses = parser.find_uses(code);
+
+        println!("\n=== Function Context Test - Found {} constant uses ===", uses.len());
+        for (caller, constant, range) in &uses {
+            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+        }
+
+        // Verify correct caller context tracking
+        let contexts: Vec<(&str, &str)> = uses.iter()
+            .map(|(caller, constant, _)| (*caller, *constant))
+            .collect();
+
+        assert!(contexts.contains(&("<module>", "TopLevel")), "Should track top-level context");
+        assert!(contexts.contains(&("instance_method", "InstanceLevel")), "Should track instance method context");
+        assert!(contexts.contains(&("class_method", "ClassMethodLevel")), "Should track class method context");
+        assert!(contexts.contains(&("standalone_function", "StandaloneLevel")), "Should track standalone function context");
+    }
+
+    #[test]
+    fn test_find_uses_real_world_url_formatter() {
+        // Real-world validation with UrlFormatter.rb from guliveo
+        // Note: Using r##"..."## to avoid conflicts with Ruby's #{...} syntax
+        let code = r##"
+module UrlFormatter
+  class << self
+    def encode(url)
+      stripped_url = url.strip
+      URI.parse(stripped_url).to_s
+    rescue URI::InvalidURIError
+      Addressable::URI.escape(stripped_url).to_s
+    end
+
+    def display_url(url)
+      return nil if url.blank?
+      output = CGI.unescape url
+      output.presence || ''
+    rescue ArgumentError
+      url = CGI.escape(url)
+    end
+
+    def reduce(url)
+      keyword_reducer = KeywordReducer.new
+      keyword_reducer.perform(url.parameterize, separator: '-')
+    end
+
+    def root_url(url)
+      Seo::Cms.subdomain?(url) ? hostname(url) : root_domain(url)
+    end
+
+    def normalized_md5(url)
+      Digest::MD5.hexdigest(normalize_for_md5(url))
+    end
+
+    def postrank_parse(url)
+      stripped_url = url.strip
+      return nil if invalid?(stripped_url)
+      PostRank::URI.parse(stripped_url)
+    rescue Addressable::URI::InvalidURIError
+      OpenStruct.new(scheme: nil, host: nil)
+    end
+
+    def build_host_domain(subdomain:)
+      domain = SETTINGS[:demo_domain]
+      "#{subdomain}.#{domain}"
+    end
+
+    def build_host_subdomain(email)
+      return SecureRandom.hex(10) if email.blank?
+      avoid_phishing_like_subdomains(email.parameterize)
+    end
+  end
+end
+"##;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let uses = parser.find_uses(code);
+
+        println!("\n=== Real-World UrlFormatter Test - Found {} constant uses ===", uses.len());
+        for (caller, constant, range) in &uses {
+            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+        }
+
+        // Verify we extract expected constants from real Ruby code
+        let constants_found: Vec<&str> = uses.iter()
+            .map(|(_, constant, _)| *constant)
+            .collect();
+
+        // Core Ruby/external library constants used in method call patterns
+        assert!(constants_found.contains(&"URI"), "Should find URI constant");
+        assert!(constants_found.contains(&"Addressable"), "Should find Addressable module");
+        assert!(constants_found.contains(&"CGI"), "Should find CGI constant");
+        assert!(constants_found.contains(&"KeywordReducer"), "Should find KeywordReducer class");
+        assert!(constants_found.contains(&"Seo"), "Should find Seo module");
+        assert!(constants_found.contains(&"Digest"), "Should find Digest module");
+        assert!(constants_found.contains(&"PostRank"), "Should find PostRank module");
+        assert!(constants_found.contains(&"OpenStruct"), "Should find OpenStruct class");
+        assert!(constants_found.contains(&"SecureRandom"), "Should find SecureRandom module");
+
+        // Note: SETTINGS[:demo_domain] uses array/hash access, not method call pattern
+        // Current implementation focuses on ConstantName.method_call patterns
+
+        // Verify caller context for specific methods
+        let encode_uses: Vec<_> = uses.iter()
+            .filter(|(caller, _, _)| *caller == "encode")
+            .collect();
+        assert!(encode_uses.len() >= 2, "encode method should use multiple constants (URI, Addressable)");
+
+        let display_url_uses: Vec<_> = uses.iter()
+            .filter(|(caller, _, _)| *caller == "display_url")
+            .collect();
+        assert!(display_url_uses.len() >= 2, "display_url method should use CGI constant");
+
+        // Ensure we're tracking relationships correctly - should find substantial uses
+        assert!(uses.len() >= 15, "Should find at least 15 constant uses in UrlFormatter (found {})", uses.len());
     }
 }
