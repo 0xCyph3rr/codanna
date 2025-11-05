@@ -56,7 +56,10 @@ end
     // - reset_attempts call
 
     // For now, just verify the method exists and returns the correct type
-    assert!(calls.is_empty() || !calls.is_empty(), "find_calls should return Vec");
+    assert!(
+        calls.is_empty() || !calls.is_empty(),
+        "find_calls should return Vec"
+    );
 
     println!("✅ Method call tracking structure test passed");
 }
@@ -67,8 +70,7 @@ fn test_ruby_dependency_graph_structure() {
 
     // Parse user.rb fixture
     let user_path = "examples/ruby/user.rb";
-    let user_code = fs::read_to_string(user_path)
-        .expect("Failed to read user.rb fixture");
+    let user_code = fs::read_to_string(user_path).expect("Failed to read user.rb fixture");
 
     let mut parser = RubyParser::new().expect("Failed to create Ruby parser");
     let mut counter = SymbolCounter::new();
@@ -79,8 +81,7 @@ fn test_ruby_dependency_graph_structure() {
 
     // Parse admin.rb fixture
     let admin_path = "examples/ruby/admin.rb";
-    let admin_code = fs::read_to_string(admin_path)
-        .expect("Failed to read admin.rb fixture");
+    let admin_code = fs::read_to_string(admin_path).expect("Failed to read admin.rb fixture");
 
     let admin_file_id = FileId::new(2).expect("Failed to create FileId");
     let admin_symbols = parser.parse(&admin_code, admin_file_id, &mut counter);
@@ -98,13 +99,15 @@ fn test_ruby_dependency_graph_structure() {
         .map(|s| s.as_ref().contains("< User"))
         .unwrap_or(false);
 
-    assert!(has_inheritance, "Admin should show dependency on User through inheritance");
+    assert!(
+        has_inheritance,
+        "Admin should show dependency on User through inheritance"
+    );
     println!("Verified: Admin < User dependency relationship");
 
     // Parse helpers.rb fixture
     let helpers_path = "examples/ruby/helpers.rb";
-    let helpers_code = fs::read_to_string(helpers_path)
-        .expect("Failed to read helpers.rb fixture");
+    let helpers_code = fs::read_to_string(helpers_path).expect("Failed to read helpers.rb fixture");
 
     let helpers_file_id = FileId::new(3).expect("Failed to create FileId");
     let helpers_symbols = parser.parse(&helpers_code, helpers_file_id, &mut counter);
@@ -274,12 +277,20 @@ end
     // Find User.find method (the target of impact analysis)
     let user_find = symbols
         .iter()
-        .find(|s| s.name.as_ref() == "find"
-            && s.kind == SymbolKind::Method
-            && s.signature.as_ref().map(|sig| sig.as_ref().contains("self.find")).unwrap_or(false))
+        .find(|s| {
+            s.name.as_ref() == "find"
+                && s.kind == SymbolKind::Method
+                && s.signature
+                    .as_ref()
+                    .map(|sig| sig.as_ref().contains("self.find"))
+                    .unwrap_or(false)
+        })
         .expect("Should find User.find method");
 
-    println!("Target for impact analysis: User.find (id={:?})", user_find.id);
+    println!(
+        "Target for impact analysis: User.find (id={:?})",
+        user_find.id
+    );
 
     // Find Admin.find method (impacted by User.find changes)
     let admin_find = symbols
@@ -336,7 +347,10 @@ end
     let timeout_constant = symbols
         .iter()
         .find(|s| s.name.as_ref() == "MAX_TIMEOUT" && s.kind == SymbolKind::Constant);
-    assert!(timeout_constant.is_some(), "Should find MAX_TIMEOUT constant");
+    assert!(
+        timeout_constant.is_some(),
+        "Should find MAX_TIMEOUT constant"
+    );
 
     // Find methods that depend on these constants
     let version_info = symbols
@@ -395,22 +409,34 @@ end
     let id_getter = symbols
         .iter()
         .find(|s| s.name.as_ref() == "id" && s.kind == SymbolKind::Method);
-    assert!(id_getter.is_some(), "Should find id getter from attr_reader");
+    assert!(
+        id_getter.is_some(),
+        "Should find id getter from attr_reader"
+    );
 
     let name_getter = symbols
         .iter()
         .find(|s| s.name.as_ref() == "name" && s.kind == SymbolKind::Method);
-    assert!(name_getter.is_some(), "Should find name getter from attr_accessor");
+    assert!(
+        name_getter.is_some(),
+        "Should find name getter from attr_accessor"
+    );
 
     let name_setter = symbols
         .iter()
         .find(|s| s.name.as_ref() == "name=" && s.kind == SymbolKind::Method);
-    assert!(name_setter.is_some(), "Should find name setter from attr_accessor");
+    assert!(
+        name_setter.is_some(),
+        "Should find name setter from attr_accessor"
+    );
 
     let email_setter = symbols
         .iter()
         .find(|s| s.name.as_ref() == "email=" && s.kind == SymbolKind::Method);
-    assert!(email_setter.is_some(), "Should find email setter from attr_accessor");
+    assert!(
+        email_setter.is_some(),
+        "Should find email setter from attr_accessor"
+    );
 
     // Find methods that depend on these synthetic methods
     let display_info = symbols
@@ -421,7 +447,10 @@ end
     let update_profile = symbols
         .iter()
         .find(|s| s.name.as_ref() == "update_profile" && s.kind == SymbolKind::Method);
-    assert!(update_profile.is_some(), "Should find update_profile method");
+    assert!(
+        update_profile.is_some(),
+        "Should find update_profile method"
+    );
 
     // Note: When method call tracking is implemented, we should verify:
     // - display_info depends on id, name, email getters
@@ -510,12 +539,18 @@ end
     let cache_key = symbols
         .iter()
         .find(|s| s.name.as_ref() == "cache_key" && s.kind == SymbolKind::Method);
-    assert!(cache_key.is_some(), "Should find cache_key method from Cacheable");
+    assert!(
+        cache_key.is_some(),
+        "Should find cache_key method from Cacheable"
+    );
 
     let updated_at = symbols
         .iter()
         .find(|s| s.name.as_ref() == "updated_at" && s.kind == SymbolKind::Method);
-    assert!(updated_at.is_some(), "Should find updated_at method from Timestamps");
+    assert!(
+        updated_at.is_some(),
+        "Should find updated_at method from Timestamps"
+    );
 
     // Note: When mixin tracking is implemented (Phase 5 - find_implementations), we should verify:
     // - Article includes Cacheable
@@ -584,7 +619,12 @@ end
         .find(|s| s.name.as_ref() == "Middle" && s.kind == SymbolKind::Class);
     assert!(middle_class.is_some(), "Should find Middle class");
     assert!(
-        middle_class.unwrap().signature.as_ref().map(|s| s.as_ref().contains("< Base")).unwrap_or(false),
+        middle_class
+            .unwrap()
+            .signature
+            .as_ref()
+            .map(|s| s.as_ref().contains("< Base"))
+            .unwrap_or(false),
         "Middle should inherit from Base"
     );
 
@@ -593,7 +633,12 @@ end
         .find(|s| s.name.as_ref() == "Derived" && s.kind == SymbolKind::Class);
     assert!(derived_class.is_some(), "Should find Derived class");
     assert!(
-        derived_class.unwrap().signature.as_ref().map(|s| s.as_ref().contains("< Middle")).unwrap_or(false),
+        derived_class
+            .unwrap()
+            .signature
+            .as_ref()
+            .map(|s| s.as_ref().contains("< Middle"))
+            .unwrap_or(false),
         "Derived should inherit from Middle"
     );
 

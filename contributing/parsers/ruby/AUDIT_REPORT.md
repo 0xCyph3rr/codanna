@@ -1,9 +1,9 @@
 # Ruby Parser Symbol Extraction Coverage Report
 
-*Generated: 2025-11-02 20:29:38 UTC*
+*Generated: 2025-11-05 16:11:04 UTC*
 
 ## Summary
-- Nodes in file: 87
+- Nodes in file: 89
 - Nodes with symbol extraction: 6
 - Symbol kinds extracted: 4
 

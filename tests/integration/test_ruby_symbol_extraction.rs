@@ -49,7 +49,10 @@ end
 
     let user = user_class.unwrap();
     assert_eq!(user.kind, SymbolKind::Class);
-    assert_eq!(user.signature.as_ref().map(|s| s.as_ref()), Some("class User"));
+    assert_eq!(
+        user.signature.as_ref().map(|s| s.as_ref()),
+        Some("class User")
+    );
     assert_eq!(user.visibility, Visibility::Public);
 
     // Find Admin class with inheritance
@@ -241,7 +244,10 @@ end
     let internal_id = symbols
         .iter()
         .find(|s| s.name.as_ref() == "internal_id" && s.kind == SymbolKind::Method);
-    assert!(internal_id.is_some(), "Should find protected method internal_id");
+    assert!(
+        internal_id.is_some(),
+        "Should find protected method internal_id"
+    );
     assert_eq!(internal_id.unwrap().visibility, Visibility::Module);
 
     let to_s = symbols
@@ -312,7 +318,10 @@ end
     let max_attempts = symbols
         .iter()
         .find(|s| s.name.as_ref() == "MAX_LOGIN_ATTEMPTS" && s.kind == SymbolKind::Constant);
-    assert!(max_attempts.is_some(), "Should find MAX_LOGIN_ATTEMPTS constant");
+    assert!(
+        max_attempts.is_some(),
+        "Should find MAX_LOGIN_ATTEMPTS constant"
+    );
     assert_eq!(
         max_attempts.unwrap().signature.as_ref().map(|s| s.as_ref()),
         Some("MAX_LOGIN_ATTEMPTS = 3")
@@ -372,25 +381,37 @@ end
     let id_getter = symbols
         .iter()
         .find(|s| s.name.as_ref() == "id" && s.kind == SymbolKind::Method);
-    assert!(id_getter.is_some(), "Should find id getter from attr_reader");
+    assert!(
+        id_getter.is_some(),
+        "Should find id getter from attr_reader"
+    );
     assert_eq!(
         id_getter.unwrap().signature.as_ref().map(|s| s.as_ref()),
         Some("def id")
     );
 
     let id_setter = symbols.iter().find(|s| s.name.as_ref() == "id=");
-    assert!(id_setter.is_none(), "Should NOT find id setter from attr_reader");
+    assert!(
+        id_setter.is_none(),
+        "Should NOT find id setter from attr_reader"
+    );
 
     // Test attr_accessor (getters and setters)
     let email_getter = symbols
         .iter()
         .find(|s| s.name.as_ref() == "email" && s.kind == SymbolKind::Method);
-    assert!(email_getter.is_some(), "Should find email getter from attr_accessor");
+    assert!(
+        email_getter.is_some(),
+        "Should find email getter from attr_accessor"
+    );
 
     let email_setter = symbols
         .iter()
         .find(|s| s.name.as_ref() == "email=" && s.kind == SymbolKind::Method);
-    assert!(email_setter.is_some(), "Should find email setter from attr_accessor");
+    assert!(
+        email_setter.is_some(),
+        "Should find email setter from attr_accessor"
+    );
     assert_eq!(
         email_setter.unwrap().signature.as_ref().map(|s| s.as_ref()),
         Some("def email=(value)")
@@ -400,12 +421,18 @@ end
     let password_getter = symbols
         .iter()
         .find(|s| s.name.as_ref() == "password" && s.kind == SymbolKind::Method);
-    assert!(password_getter.is_none(), "Should NOT find password getter from attr_writer");
+    assert!(
+        password_getter.is_none(),
+        "Should NOT find password getter from attr_writer"
+    );
 
     let password_setter = symbols
         .iter()
         .find(|s| s.name.as_ref() == "password=" && s.kind == SymbolKind::Method);
-    assert!(password_setter.is_some(), "Should find password setter from attr_writer");
+    assert!(
+        password_setter.is_some(),
+        "Should find password setter from attr_writer"
+    );
 
     println!("✅ attr_accessor extraction test passed");
 }
@@ -415,8 +442,7 @@ fn test_ruby_comprehensive_fixture() {
     println!("\n=== Testing Ruby Comprehensive Fixture ===");
 
     let fixture_path = "examples/ruby/comprehensive.rb";
-    let code = fs::read_to_string(fixture_path)
-        .expect("Failed to read comprehensive Ruby fixture");
+    let code = fs::read_to_string(fixture_path).expect("Failed to read comprehensive Ruby fixture");
 
     let mut parser = RubyParser::new().expect("Failed to create Ruby parser");
     let mut counter = SymbolCounter::new();
@@ -424,7 +450,10 @@ fn test_ruby_comprehensive_fixture() {
 
     let symbols = parser.parse(&code, file_id, &mut counter);
 
-    println!("Extracted {} symbols from comprehensive fixture", symbols.len());
+    println!(
+        "Extracted {} symbols from comprehensive fixture",
+        symbols.len()
+    );
 
     // Count symbols by kind
     let mut class_count = 0;
@@ -456,19 +485,27 @@ fn test_ruby_comprehensive_fixture() {
 
     // Validate specific symbols from the comprehensive fixture
     assert!(
-        symbols.iter().any(|s| s.name.as_ref() == "User" && s.kind == SymbolKind::Class),
+        symbols
+            .iter()
+            .any(|s| s.name.as_ref() == "User" && s.kind == SymbolKind::Class),
         "Should find User class"
     );
     assert!(
-        symbols.iter().any(|s| s.name.as_ref() == "Admin" && s.kind == SymbolKind::Class),
+        symbols
+            .iter()
+            .any(|s| s.name.as_ref() == "Admin" && s.kind == SymbolKind::Class),
         "Should find Admin class"
     );
     assert!(
-        symbols.iter().any(|s| s.name.as_ref() == "Authentication" && s.kind == SymbolKind::Module),
+        symbols
+            .iter()
+            .any(|s| s.name.as_ref() == "Authentication" && s.kind == SymbolKind::Module),
         "Should find Authentication module"
     );
     assert!(
-        symbols.iter().any(|s| s.name.as_ref() == "OAuth" && s.kind == SymbolKind::Module),
+        symbols
+            .iter()
+            .any(|s| s.name.as_ref() == "OAuth" && s.kind == SymbolKind::Module),
         "Should find OAuth module"
     );
 
@@ -480,8 +517,7 @@ fn test_ruby_user_fixture() {
     println!("\n=== Testing Ruby User Fixture ===");
 
     let fixture_path = "examples/ruby/user.rb";
-    let code = fs::read_to_string(fixture_path)
-        .expect("Failed to read user Ruby fixture");
+    let code = fs::read_to_string(fixture_path).expect("Failed to read user Ruby fixture");
 
     let mut parser = RubyParser::new().expect("Failed to create Ruby parser");
     let mut counter = SymbolCounter::new();
@@ -493,21 +529,29 @@ fn test_ruby_user_fixture() {
 
     // Validate Models::User class
     assert!(
-        symbols.iter().any(|s| s.name.as_ref() == "User" && s.kind == SymbolKind::Class),
+        symbols
+            .iter()
+            .any(|s| s.name.as_ref() == "User" && s.kind == SymbolKind::Class),
         "Should find User class"
     );
 
     // Validate methods
     assert!(
-        symbols.iter().any(|s| s.name.as_ref() == "initialize" && s.kind == SymbolKind::Method),
+        symbols
+            .iter()
+            .any(|s| s.name.as_ref() == "initialize" && s.kind == SymbolKind::Method),
         "Should find initialize method"
     );
     assert!(
-        symbols.iter().any(|s| s.name.as_ref() == "find" && s.kind == SymbolKind::Method),
+        symbols
+            .iter()
+            .any(|s| s.name.as_ref() == "find" && s.kind == SymbolKind::Method),
         "Should find find class method"
     );
     assert!(
-        symbols.iter().any(|s| s.name.as_ref() == "update" && s.kind == SymbolKind::Method),
+        symbols
+            .iter()
+            .any(|s| s.name.as_ref() == "update" && s.kind == SymbolKind::Method),
         "Should find update method"
     );
 
@@ -520,7 +564,9 @@ fn test_ruby_user_fixture() {
 
     // Validate constants
     assert!(
-        symbols.iter().any(|s| s.name.as_ref() == "MAX_NAME_LENGTH" && s.kind == SymbolKind::Constant),
+        symbols
+            .iter()
+            .any(|s| s.name.as_ref() == "MAX_NAME_LENGTH" && s.kind == SymbolKind::Constant),
         "Should find MAX_NAME_LENGTH constant"
     );
 

@@ -240,13 +240,7 @@ mod tests {
             ),
             (
                 "BLOCK AND LAMBDA NODES",
-                vec![
-                    "block",
-                    "do_block",
-                    "lambda",
-                    "begin_block",
-                    "end_block",
-                ],
+                vec!["block", "do_block", "lambda", "begin_block", "end_block"],
             ),
             (
                 "CONTROL FLOW NODES",
@@ -346,7 +340,9 @@ mod tests {
             output.push('\n');
         }
 
-        output.push_str("Legend: ✓ = found in file, ○ = in grammar but not in file, ✗ = not in grammar\n");
+        output.push_str(
+            "Legend: ✓ = found in file, ○ = in grammar but not in file, ✗ = not in grammar\n",
+        );
 
         output
     }

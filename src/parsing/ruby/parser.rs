@@ -11,13 +11,13 @@
 //! tree-sitter-ruby version, verify compatibility with node type names used in this implementation.
 
 use crate::parsing::Import;
+use crate::parsing::context::Visibility as ContextVisibility;
 use crate::parsing::parser::check_recursion_depth;
 use crate::parsing::{
     HandledNode, Language, LanguageParser, MethodCall, NodeTracker, NodeTrackingState,
     ParserContext, ScopeType,
 };
 use crate::symbol::Visibility as SymbolVisibility;
-use crate::parsing::context::Visibility as ContextVisibility;
 use crate::types::SymbolCounter;
 use crate::{FileId, Range, Symbol, SymbolKind};
 use std::any::Any;
@@ -139,7 +139,9 @@ impl RubyParser {
                 self.register_handled_node(node.kind(), node.kind_id());
 
                 // Extract class symbol
-                if let Some(class_symbol) = self.process_class(node, code, file_id, counter, context) {
+                if let Some(class_symbol) =
+                    self.process_class(node, code, file_id, counter, context)
+                {
                     let class_name = class_symbol.name.to_string();
                     symbols.push(class_symbol);
 
@@ -163,7 +165,9 @@ impl RubyParser {
                 self.register_handled_node(node.kind(), node.kind_id());
 
                 // Extract module symbol
-                if let Some(module_symbol) = self.process_module(node, code, file_id, counter, context) {
+                if let Some(module_symbol) =
+                    self.process_module(node, code, file_id, counter, context)
+                {
                     symbols.push(module_symbol);
 
                     // Enter module scope for nested members
@@ -181,7 +185,9 @@ impl RubyParser {
                 self.register_handled_node(node.kind(), node.kind_id());
 
                 // Extract method symbol with current visibility
-                if let Some(method_symbol) = self.process_method(node, code, file_id, counter, context) {
+                if let Some(method_symbol) =
+                    self.process_method(node, code, file_id, counter, context)
+                {
                     symbols.push(method_symbol);
                 }
 
@@ -192,7 +198,9 @@ impl RubyParser {
                 self.register_handled_node(node.kind(), node.kind_id());
 
                 // Extract singleton (class) method symbol
-                if let Some(method_symbol) = self.process_singleton_method(node, code, file_id, counter, context) {
+                if let Some(method_symbol) =
+                    self.process_singleton_method(node, code, file_id, counter, context)
+                {
                     symbols.push(method_symbol);
                 }
 
@@ -212,7 +220,9 @@ impl RubyParser {
                 self.register_handled_node(node.kind(), node.kind_id());
 
                 // Extract constant if left side is uppercase identifier
-                if let Some(constant_symbol) = self.process_assignment(node, code, file_id, counter, context) {
+                if let Some(constant_symbol) =
+                    self.process_assignment(node, code, file_id, counter, context)
+                {
                     symbols.push(constant_symbol);
                 }
 
@@ -480,7 +490,13 @@ impl RubyParser {
     /// - "def method_name(param1, param2)" (with parameters)
     /// - "def method_name(param1, param2 = default)" (with default values)
     /// - "def self.method_name(param1)" (singleton method)
-    fn extract_method_signature(&self, node: Node, code: &str, method_name: &str, is_singleton: bool) -> String {
+    fn extract_method_signature(
+        &self,
+        node: Node,
+        code: &str,
+        method_name: &str,
+        is_singleton: bool,
+    ) -> String {
         let params = self.extract_parameters(node, code);
 
         if is_singleton {
@@ -592,7 +608,15 @@ impl RubyParser {
             // Handle attr_accessor, attr_reader, attr_writer
             match method_text {
                 "attr_accessor" | "attr_reader" | "attr_writer" => {
-                    self.generate_synthetic_methods(node, code, file_id, symbols, counter, context, method_text);
+                    self.generate_synthetic_methods(
+                        node,
+                        code,
+                        file_id,
+                        symbols,
+                        counter,
+                        context,
+                        method_text,
+                    );
                 }
                 _ => {}
             }
@@ -844,7 +868,12 @@ impl RubyParser {
                 if let Some(name) = self.extract_method_name(node, code) {
                     let old_function = *current_function;
                     *current_function = Some(name);
-                    self.process_children_for_method_calls(node, code, method_calls, current_function);
+                    self.process_children_for_method_calls(
+                        node,
+                        code,
+                        method_calls,
+                        current_function,
+                    );
                     *current_function = old_function;
                 }
             }
@@ -887,7 +916,8 @@ impl RubyParser {
         let range = self.node_to_range(node);
 
         // Extract receiver if present (obj.method syntax)
-        let receiver = node.child_by_field_name("receiver")
+        let receiver = node
+            .child_by_field_name("receiver")
             .map(|r| &code[r.byte_range()]);
 
         let mut method_call = MethodCall::new(caller, method_name, range);
@@ -968,6 +998,113 @@ impl RubyParser {
             self.find_constant_uses_in_node(child, code, uses, current_function);
         }
     }
+
+    /// Recursively find mixin calls (include/extend/prepend) in the AST
+    ///
+    /// Handles:
+    /// - include: Adds instance methods from a module
+    /// - extend: Adds class methods from a module
+    /// - prepend: Adds methods with precedence over include
+    ///
+    /// Mixins are NOT distinct node types in tree-sitter-ruby - they are 'call' nodes
+    /// with identifier children having names 'include'/'extend'/'prepend'.
+    fn find_mixins_in_node<'a>(
+        &mut self,
+        node: Node,
+        code: &'a str,
+        implementations: &mut Vec<(&'a str, &'a str, Range)>,
+        class_stack: &mut Vec<&'a str>,
+    ) {
+        match node.kind() {
+            "class" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                if let Some(class_name) = self.extract_class_name(node, code) {
+                    class_stack.push(class_name);
+                    self.process_children_for_mixins(node, code, implementations, class_stack);
+                    class_stack.pop();
+                }
+            }
+            "module" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                if let Some(module_name) = self.extract_module_name(node, code) {
+                    class_stack.push(module_name);
+                    self.process_children_for_mixins(node, code, implementations, class_stack);
+                    class_stack.pop();
+                }
+            }
+            "singleton_class" => {
+                // Singleton classes preserve parent context - don't push/pop stack
+                self.register_handled_node(node.kind(), node.kind_id());
+                self.process_children_for_mixins(node, code, implementations, class_stack);
+            }
+            "call" => {
+                self.register_handled_node(node.kind(), node.kind_id());
+                // Check if this is a mixin call (include/extend/prepend)
+                if let Some(method_node) = node.child_by_field_name("method") {
+                    let method_text = &code[method_node.byte_range()];
+
+                    if method_text == "include"
+                        || method_text == "extend"
+                        || method_text == "prepend"
+                    {
+                        // Get the current class/module context
+                        if let Some(implementer) = class_stack.last() {
+                            // Extract module names from the argument list
+                            self.extract_mixin_modules(node, code, implementer, implementations);
+                        }
+                    }
+                }
+                self.process_children_for_mixins(node, code, implementations, class_stack);
+            }
+            _ => {
+                self.process_children_for_mixins(node, code, implementations, class_stack);
+            }
+        }
+    }
+
+    /// Extract module names from mixin call arguments
+    ///
+    /// Handles:
+    /// - Simple constants: `include Enumerable`
+    /// - Qualified names: `include Features::Security`
+    /// - Multiple mixins: `include A, B, C`
+    fn extract_mixin_modules<'a>(
+        &self,
+        call_node: Node,
+        code: &'a str,
+        implementer: &'a str,
+        implementations: &mut Vec<(&'a str, &'a str, Range)>,
+    ) {
+        if let Some(args_node) = call_node.child_by_field_name("arguments") {
+            let mut cursor = args_node.walk();
+            for child in args_node.children(&mut cursor) {
+                match child.kind() {
+                    "constant" | "scope_resolution" => {
+                        // Extract module name using byte_range to handle both simple and qualified names
+                        let module_name = &code[child.byte_range()];
+                        let range = self.node_to_range(child);
+                        implementations.push((implementer, module_name, range));
+                    }
+                    _ => {
+                        // Skip other nodes (e.g., commas, parentheses, inline module definitions)
+                    }
+                }
+            }
+        }
+    }
+
+    /// Process child nodes for mixin extraction
+    fn process_children_for_mixins<'a>(
+        &mut self,
+        node: Node,
+        code: &'a str,
+        implementations: &mut Vec<(&'a str, &'a str, Range)>,
+        class_stack: &mut Vec<&'a str>,
+    ) {
+        for child in node.children(&mut node.walk()) {
+            self.find_mixins_in_node(child, code, implementations, class_stack);
+        }
+    }
 }
 
 impl NodeTracker for RubyParser {
@@ -981,12 +1118,7 @@ impl NodeTracker for RubyParser {
 }
 
 impl LanguageParser for RubyParser {
-    fn parse(
-        &mut self,
-        code: &str,
-        file_id: FileId,
-        counter: &mut SymbolCounter,
-    ) -> Vec<Symbol> {
+    fn parse(&mut self, code: &str, file_id: FileId, counter: &mut SymbolCounter) -> Vec<Symbol> {
         Self::parse(self, code, file_id, counter)
     }
 
@@ -1081,9 +1213,18 @@ impl LanguageParser for RubyParser {
         method_calls
     }
 
-    fn find_implementations<'a>(&mut self, _code: &'a str) -> Vec<(&'a str, &'a str, Range)> {
-        // TODO: Phase 5 - Module inclusions (include/prepend)
-        Vec::new()
+    fn find_implementations<'a>(&mut self, code: &'a str) -> Vec<(&'a str, &'a str, Range)> {
+        let tree = match self.parser.parse(code, None) {
+            Some(tree) => tree,
+            None => return Vec::new(),
+        };
+
+        let root = tree.root_node();
+        let mut implementations = Vec::new();
+        let mut class_stack: Vec<&'a str> = Vec::new();
+
+        self.find_mixins_in_node(root, code, &mut implementations, &mut class_stack);
+        implementations
     }
 
     fn find_uses<'a>(&mut self, code: &'a str) -> Vec<(&'a str, &'a str, Range)> {
@@ -1145,7 +1286,10 @@ end
         let symbols = parser.parse(code, file_id, &mut counter);
 
         // Should have module symbol + User class
-        assert!(symbols.len() >= 2, "Should have at least module and User class");
+        assert!(
+            symbols.len() >= 2,
+            "Should have at least module and User class"
+        );
         assert_eq!(
             symbols[0].name.as_ref(),
             "<module>",
@@ -1158,7 +1302,10 @@ end
 
         let user_class = user_class.unwrap();
         assert_eq!(user_class.kind, SymbolKind::Class);
-        assert_eq!(user_class.signature.as_ref().map(|s| s.as_ref()), Some("class User"));
+        assert_eq!(
+            user_class.signature.as_ref().map(|s| s.as_ref()),
+            Some("class User")
+        );
     }
 
     #[test]
@@ -1188,10 +1335,16 @@ end
         let admin_class = admin_class.unwrap();
 
         // Verify User class has no superclass
-        assert_eq!(user_class.signature.as_ref().map(|s| s.as_ref()), Some("class User"));
+        assert_eq!(
+            user_class.signature.as_ref().map(|s| s.as_ref()),
+            Some("class User")
+        );
 
         // Verify Admin class has User as superclass
-        assert_eq!(admin_class.signature.as_ref().map(|s| s.as_ref()), Some("class Admin < User"));
+        assert_eq!(
+            admin_class.signature.as_ref().map(|s| s.as_ref()),
+            Some("class Admin < User")
+        );
     }
 
     #[test]
@@ -1218,7 +1371,10 @@ end
 
         let auth_module = auth_module.unwrap();
         assert_eq!(auth_module.kind, SymbolKind::Module);
-        assert_eq!(auth_module.signature.as_ref().map(|s| s.as_ref()), Some("module Authentication"));
+        assert_eq!(
+            auth_module.signature.as_ref().map(|s| s.as_ref()),
+            Some("module Authentication")
+        );
     }
 
     #[test]
@@ -1333,11 +1489,17 @@ end
 
         let initialize = initialize.unwrap();
         assert_eq!(initialize.kind, SymbolKind::Method);
-        assert_eq!(initialize.signature.as_ref().map(|s| s.as_ref()), Some("def initialize(name)"));
+        assert_eq!(
+            initialize.signature.as_ref().map(|s| s.as_ref()),
+            Some("def initialize(name)")
+        );
 
         let greet = greet.unwrap();
         assert_eq!(greet.kind, SymbolKind::Method);
-        assert_eq!(greet.signature.as_ref().map(|s| s.as_ref()), Some("def greet"));
+        assert_eq!(
+            greet.signature.as_ref().map(|s| s.as_ref()),
+            Some("def greet")
+        );
     }
 
     #[test]
@@ -1369,11 +1531,17 @@ end
 
         let find = find.unwrap();
         assert_eq!(find.kind, SymbolKind::Method);
-        assert_eq!(find.signature.as_ref().map(|s| s.as_ref()), Some("def self.find(id)"));
+        assert_eq!(
+            find.signature.as_ref().map(|s| s.as_ref()),
+            Some("def self.find(id)")
+        );
 
         let count = count.unwrap();
         assert_eq!(count.kind, SymbolKind::Method);
-        assert_eq!(count.signature.as_ref().map(|s| s.as_ref()), Some("def self.count"));
+        assert_eq!(
+            count.signature.as_ref().map(|s| s.as_ref()),
+            Some("def self.count")
+        );
     }
 
     #[test]
@@ -1409,13 +1577,20 @@ end
         // Find methods with different visibility
         let public_method = symbols.iter().find(|s| s.name.as_ref() == "public_method");
         let private_method = symbols.iter().find(|s| s.name.as_ref() == "private_method");
-        let protected_method = symbols.iter().find(|s| s.name.as_ref() == "protected_method");
-        let another_public = symbols.iter().find(|s| s.name.as_ref() == "another_public_method");
+        let protected_method = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "protected_method");
+        let another_public = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "another_public_method");
 
         assert!(public_method.is_some(), "Should find public_method");
         assert!(private_method.is_some(), "Should find private_method");
         assert!(protected_method.is_some(), "Should find protected_method");
-        assert!(another_public.is_some(), "Should find another_public_method");
+        assert!(
+            another_public.is_some(),
+            "Should find another_public_method"
+        );
 
         use crate::symbol::Visibility as SymVis;
 
@@ -1440,10 +1615,22 @@ end
         let symbols = parser.parse(code, file_id, &mut counter);
 
         // Find getter and setter methods
-        let name_getter = symbols.iter().find(|s| s.name.as_ref() == "name" && s.signature.as_ref().map(|s| s.as_ref()) == Some("def name"));
-        let name_setter = symbols.iter().find(|s| s.name.as_ref() == "name=" && s.signature.as_ref().map(|s| s.as_ref()) == Some("def name=(value)"));
-        let email_getter = symbols.iter().find(|s| s.name.as_ref() == "email" && s.signature.as_ref().map(|s| s.as_ref()) == Some("def email"));
-        let email_setter = symbols.iter().find(|s| s.name.as_ref() == "email=" && s.signature.as_ref().map(|s| s.as_ref()) == Some("def email=(value)"));
+        let name_getter = symbols.iter().find(|s| {
+            s.name.as_ref() == "name"
+                && s.signature.as_ref().map(|s| s.as_ref()) == Some("def name")
+        });
+        let name_setter = symbols.iter().find(|s| {
+            s.name.as_ref() == "name="
+                && s.signature.as_ref().map(|s| s.as_ref()) == Some("def name=(value)")
+        });
+        let email_getter = symbols.iter().find(|s| {
+            s.name.as_ref() == "email"
+                && s.signature.as_ref().map(|s| s.as_ref()) == Some("def email")
+        });
+        let email_setter = symbols.iter().find(|s| {
+            s.name.as_ref() == "email="
+                && s.signature.as_ref().map(|s| s.as_ref()) == Some("def email=(value)")
+        });
 
         assert!(name_getter.is_some(), "Should generate name getter");
         assert!(name_setter.is_some(), "Should generate name setter");
@@ -1466,8 +1653,12 @@ end
         let symbols = parser.parse(code, file_id, &mut counter);
 
         // Find getter methods only
-        let id_getter = symbols.iter().find(|s| s.name.as_ref() == "id" && s.kind == SymbolKind::Method);
-        let username_getter = symbols.iter().find(|s| s.name.as_ref() == "username" && s.kind == SymbolKind::Method);
+        let id_getter = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "id" && s.kind == SymbolKind::Method);
+        let username_getter = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "username" && s.kind == SymbolKind::Method);
 
         // Should NOT find setter methods
         let id_setter = symbols.iter().find(|s| s.name.as_ref() == "id=");
@@ -1476,7 +1667,10 @@ end
         assert!(id_getter.is_some(), "Should generate id getter");
         assert!(username_getter.is_some(), "Should generate username getter");
         assert!(id_setter.is_none(), "Should NOT generate id setter");
-        assert!(username_setter.is_none(), "Should NOT generate username setter");
+        assert!(
+            username_setter.is_none(),
+            "Should NOT generate username setter"
+        );
     }
 
     #[test]
@@ -1494,13 +1688,20 @@ end
         let symbols = parser.parse(code, file_id, &mut counter);
 
         // Find setter method only
-        let password_setter = symbols.iter().find(|s| s.name.as_ref() == "password=" && s.kind == SymbolKind::Method);
+        let password_setter = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "password=" && s.kind == SymbolKind::Method);
 
         // Should NOT find getter method
-        let password_getter = symbols.iter().find(|s| s.name.as_ref() == "password" && s.kind == SymbolKind::Method);
+        let password_getter = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "password" && s.kind == SymbolKind::Method);
 
         assert!(password_setter.is_some(), "Should generate password setter");
-        assert!(password_getter.is_none(), "Should NOT generate password getter");
+        assert!(
+            password_getter.is_none(),
+            "Should NOT generate password getter"
+        );
     }
 
     #[test]
@@ -1542,22 +1743,48 @@ end
         let with_block = symbols.iter().find(|s| s.name.as_ref() == "with_block");
 
         assert!(simple.is_some(), "Should find simple method");
-        assert_eq!(simple.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("def simple(arg1, arg2)"));
+        assert_eq!(
+            simple.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("def simple(arg1, arg2)")
+        );
 
         assert!(with_defaults.is_some(), "Should find with_defaults method");
-        assert_eq!(with_defaults.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("def with_defaults(arg1, arg2 = \"default\")"));
+        assert_eq!(
+            with_defaults
+                .unwrap()
+                .signature
+                .as_ref()
+                .map(|s| s.as_ref()),
+            Some("def with_defaults(arg1, arg2 = \"default\")")
+        );
 
         assert!(with_keywords.is_some(), "Should find with_keywords method");
-        assert_eq!(with_keywords.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("def with_keywords(required:, optional: \"default\")"));
+        assert_eq!(
+            with_keywords
+                .unwrap()
+                .signature
+                .as_ref()
+                .map(|s| s.as_ref()),
+            Some("def with_keywords(required:, optional: \"default\")")
+        );
 
         assert!(with_splat.is_some(), "Should find with_splat method");
-        assert_eq!(with_splat.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("def with_splat(*args)"));
+        assert_eq!(
+            with_splat.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("def with_splat(*args)")
+        );
 
         assert!(with_kwargs.is_some(), "Should find with_kwargs method");
-        assert_eq!(with_kwargs.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("def with_kwargs(**kwargs)"));
+        assert_eq!(
+            with_kwargs.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("def with_kwargs(**kwargs)")
+        );
 
         assert!(with_block.is_some(), "Should find with_block method");
-        assert_eq!(with_block.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("def with_block(&block)"));
+        assert_eq!(
+            with_block.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("def with_block(&block)")
+        );
     }
 
     // Phase 4 tests - Constant extraction
@@ -1579,7 +1806,9 @@ end
 
         // Find constants
         let version = symbols.iter().find(|s| s.name.as_ref() == "VERSION");
-        let timeout = symbols.iter().find(|s| s.name.as_ref() == "DEFAULT_TIMEOUT");
+        let timeout = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "DEFAULT_TIMEOUT");
 
         assert!(version.is_some(), "Should find VERSION constant");
         assert!(timeout.is_some(), "Should find DEFAULT_TIMEOUT constant");
@@ -1587,11 +1816,17 @@ end
         let version = version.unwrap();
         assert_eq!(version.kind, SymbolKind::Constant);
         assert_eq!(version.visibility, SymbolVisibility::Public);
-        assert_eq!(version.signature.as_ref().map(|s| s.as_ref()), Some("VERSION = \"1.0.0\""));
+        assert_eq!(
+            version.signature.as_ref().map(|s| s.as_ref()),
+            Some("VERSION = \"1.0.0\"")
+        );
 
         let timeout = timeout.unwrap();
         assert_eq!(timeout.kind, SymbolKind::Constant);
-        assert_eq!(timeout.signature.as_ref().map(|s| s.as_ref()), Some("DEFAULT_TIMEOUT = 30"));
+        assert_eq!(
+            timeout.signature.as_ref().map(|s| s.as_ref()),
+            Some("DEFAULT_TIMEOUT = 30")
+        );
     }
 
     #[test]
@@ -1611,17 +1846,31 @@ end
         let symbols = parser.parse(code, file_id, &mut counter);
 
         // Find constants
-        let max_attempts = symbols.iter().find(|s| s.name.as_ref() == "MAX_LOGIN_ATTEMPTS");
+        let max_attempts = symbols
+            .iter()
+            .find(|s| s.name.as_ref() == "MAX_LOGIN_ATTEMPTS");
         let default_role = symbols.iter().find(|s| s.name.as_ref() == "DEFAULT_ROLE");
         let permissions = symbols.iter().find(|s| s.name.as_ref() == "PERMISSIONS");
 
-        assert!(max_attempts.is_some(), "Should find MAX_LOGIN_ATTEMPTS constant");
+        assert!(
+            max_attempts.is_some(),
+            "Should find MAX_LOGIN_ATTEMPTS constant"
+        );
         assert!(default_role.is_some(), "Should find DEFAULT_ROLE constant");
         assert!(permissions.is_some(), "Should find PERMISSIONS constant");
 
-        assert_eq!(max_attempts.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("MAX_LOGIN_ATTEMPTS = 3"));
-        assert_eq!(default_role.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("DEFAULT_ROLE = \"guest\""));
-        assert_eq!(permissions.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("PERMISSIONS = [...]"));
+        assert_eq!(
+            max_attempts.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("MAX_LOGIN_ATTEMPTS = 3")
+        );
+        assert_eq!(
+            default_role.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("DEFAULT_ROLE = \"guest\"")
+        );
+        assert_eq!(
+            permissions.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("PERMISSIONS = [...]")
+        );
     }
 
     #[test]
@@ -1661,7 +1910,10 @@ end
         let global_var = symbols.iter().find(|s| s.name.as_ref() == "$global");
 
         assert!(class_var.is_none(), "Should NOT extract class variables");
-        assert!(instance_var.is_none(), "Should NOT extract instance variables");
+        assert!(
+            instance_var.is_none(),
+            "Should NOT extract instance variables"
+        );
         assert!(local_var.is_none(), "Should NOT extract local variables");
         assert!(global_var.is_none(), "Should NOT extract global variables");
     }
@@ -1697,14 +1949,42 @@ end
         let hash_value = symbols.iter().find(|s| s.name.as_ref() == "HASH_VALUE");
         let expression = symbols.iter().find(|s| s.name.as_ref() == "EXPRESSION");
 
-        assert_eq!(simple_string.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("SIMPLE_STRING = \"hello\""));
-        assert_eq!(simple_int.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("SIMPLE_INT = 42"));
-        assert_eq!(simple_float.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("SIMPLE_FLOAT = 3.14"));
-        assert_eq!(simple_bool.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("SIMPLE_BOOL = true"));
-        assert_eq!(simple_nil.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("SIMPLE_NIL = nil"));
-        assert_eq!(array_value.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("ARRAY_VALUE = [...]"));
-        assert_eq!(hash_value.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("HASH_VALUE = {{...}}"));
-        assert_eq!(expression.unwrap().signature.as_ref().map(|s| s.as_ref()), Some("EXPRESSION = <expression>"));
+        assert_eq!(
+            simple_string
+                .unwrap()
+                .signature
+                .as_ref()
+                .map(|s| s.as_ref()),
+            Some("SIMPLE_STRING = \"hello\"")
+        );
+        assert_eq!(
+            simple_int.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("SIMPLE_INT = 42")
+        );
+        assert_eq!(
+            simple_float.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("SIMPLE_FLOAT = 3.14")
+        );
+        assert_eq!(
+            simple_bool.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("SIMPLE_BOOL = true")
+        );
+        assert_eq!(
+            simple_nil.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("SIMPLE_NIL = nil")
+        );
+        assert_eq!(
+            array_value.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("ARRAY_VALUE = [...]")
+        );
+        assert_eq!(
+            hash_value.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("HASH_VALUE = {{...}}")
+        );
+        assert_eq!(
+            expression.unwrap().signature.as_ref().map(|s| s.as_ref()),
+            Some("EXPRESSION = <expression>")
+        );
     }
 
     #[test]
@@ -1793,29 +2073,68 @@ end
         assert!(user_class.is_some(), "Should find User class");
         let user_doc = user_class.unwrap().doc_comment.as_ref().map(|s| s.as_ref());
         assert!(user_doc.is_some(), "User class should have doc comment");
-        assert!(user_doc.unwrap().contains("User class"), "Should contain 'User class'");
-        assert!(user_doc.unwrap().contains("manages user data"), "Should contain 'manages user data'");
+        assert!(
+            user_doc.unwrap().contains("User class"),
+            "Should contain 'User class'"
+        );
+        assert!(
+            user_doc.unwrap().contains("manages user data"),
+            "Should contain 'manages user data'"
+        );
 
         // Test add method comment (YARD tags)
         assert!(add_method.is_some(), "Should find add method");
         let add_doc = add_method.unwrap().doc_comment.as_ref().map(|s| s.as_ref());
         assert!(add_doc.is_some(), "add method should have doc comment");
-        assert!(add_doc.unwrap().contains("Calculate the sum"), "Should contain 'Calculate the sum'");
-        assert!(add_doc.unwrap().contains("@param a"), "Should preserve YARD @param tag");
-        assert!(add_doc.unwrap().contains("@return"), "Should preserve YARD @return tag");
+        assert!(
+            add_doc.unwrap().contains("Calculate the sum"),
+            "Should contain 'Calculate the sum'"
+        );
+        assert!(
+            add_doc.unwrap().contains("@param a"),
+            "Should preserve YARD @param tag"
+        );
+        assert!(
+            add_doc.unwrap().contains("@return"),
+            "Should preserve YARD @return tag"
+        );
 
         // Test Configuration module comment (=begin...=end)
         assert!(config_module.is_some(), "Should find Configuration module");
-        let config_doc = config_module.unwrap().doc_comment.as_ref().map(|s| s.as_ref());
-        assert!(config_doc.is_some(), "Configuration module should have doc comment");
-        assert!(config_doc.unwrap().contains("multi-line comment"), "Should contain 'multi-line comment'");
-        assert!(config_doc.unwrap().contains("Configuration module"), "Should contain 'Configuration module'");
+        let config_doc = config_module
+            .unwrap()
+            .doc_comment
+            .as_ref()
+            .map(|s| s.as_ref());
+        assert!(
+            config_doc.is_some(),
+            "Configuration module should have doc comment"
+        );
+        assert!(
+            config_doc.unwrap().contains("multi-line comment"),
+            "Should contain 'multi-line comment'"
+        );
+        assert!(
+            config_doc.unwrap().contains("Configuration module"),
+            "Should contain 'Configuration module'"
+        );
 
         // Test simple_method comment (single-line)
         assert!(simple_method.is_some(), "Should find simple_method");
-        let simple_doc = simple_method.unwrap().doc_comment.as_ref().map(|s| s.as_ref());
-        assert!(simple_doc.is_some(), "simple_method should have doc comment");
-        assert_eq!(simple_doc.unwrap(), "Simple single-line comment", "Should match exact comment text");
+        let simple_doc = simple_method
+            .unwrap()
+            .doc_comment
+            .as_ref()
+            .map(|s| s.as_ref());
+        assert!(
+            simple_doc.is_some(),
+            "simple_method should have doc comment"
+        );
+        assert_eq!(
+            simple_doc.unwrap(),
+            "Simple single-line comment",
+            "Should match exact comment text"
+        );
     }
 
     #[test]
@@ -1843,38 +2162,55 @@ article = Article.create(title: "Test")
 
         println!("\n=== Found {} constant uses ===", uses.len());
         for (caller, constant, range) in &uses {
-            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+            println!(
+                "  {} uses {} at {}:{}",
+                caller, constant, range.start_line, range.start_column
+            );
         }
 
         // Verify we found the constant uses
         assert!(uses.len() > 0, "Should find at least one constant use");
 
         // Check for specific patterns
-        let user_uses: Vec<_> = uses.iter()
+        let user_uses: Vec<_> = uses
+            .iter()
             .filter(|(_, constant, _)| *constant == "User")
             .collect();
         assert!(user_uses.len() > 0, "Should find User constant usage");
 
-        let dataprocessor_uses: Vec<_> = uses.iter()
+        let dataprocessor_uses: Vec<_> = uses
+            .iter()
             .filter(|(_, constant, _)| *constant == "DataProcessor")
             .collect();
-        assert!(dataprocessor_uses.len() > 0, "Should find DataProcessor constant usage");
+        assert!(
+            dataprocessor_uses.len() > 0,
+            "Should find DataProcessor constant usage"
+        );
 
-        let admin_uses: Vec<_> = uses.iter()
+        let admin_uses: Vec<_> = uses
+            .iter()
             .filter(|(_, constant, _)| *constant == "Admin")
             .collect();
         assert!(admin_uses.len() > 0, "Should find Admin constant usage");
 
         // Verify caller context
-        let test_method_uses: Vec<_> = uses.iter()
+        let test_method_uses: Vec<_> = uses
+            .iter()
             .filter(|(caller, _, _)| *caller == "test_method")
             .collect();
-        assert!(test_method_uses.len() >= 3, "test_method should use at least 3 constants");
+        assert!(
+            test_method_uses.len() >= 3,
+            "test_method should use at least 3 constants"
+        );
 
-        let module_uses: Vec<_> = uses.iter()
+        let module_uses: Vec<_> = uses
+            .iter()
             .filter(|(caller, _, _)| *caller == "<module>")
             .collect();
-        assert!(module_uses.len() > 0, "Should find top-level constant usage");
+        assert!(
+            module_uses.len() > 0,
+            "Should find top-level constant usage"
+        );
     }
 
     #[test]
@@ -1895,31 +2231,52 @@ end
         let mut parser = RubyParser::new().expect("Failed to create parser");
         let uses = parser.find_uses(code);
 
-        println!("\n=== Scope Resolution Test - Found {} constant uses ===", uses.len());
+        println!(
+            "\n=== Scope Resolution Test - Found {} constant uses ===",
+            uses.len()
+        );
         for (caller, constant, range) in &uses {
-            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+            println!(
+                "  {} uses {} at {}:{}",
+                caller, constant, range.start_line, range.start_column
+            );
         }
 
         // Verify we found scope resolution patterns
-        assert!(uses.len() > 0, "Should find constant uses with scope resolution");
+        assert!(
+            uses.len() > 0,
+            "Should find constant uses with scope resolution"
+        );
 
         // Check for MyApp module reference
-        let myapp_uses: Vec<_> = uses.iter()
+        let myapp_uses: Vec<_> = uses
+            .iter()
             .filter(|(_, constant, _)| *constant == "MyApp")
             .collect();
-        assert!(myapp_uses.len() > 0, "Should find MyApp in MyApp::User pattern");
+        assert!(
+            myapp_uses.len() > 0,
+            "Should find MyApp in MyApp::User pattern"
+        );
 
         // Check for JSON module reference
-        let json_uses: Vec<_> = uses.iter()
+        let json_uses: Vec<_> = uses
+            .iter()
             .filter(|(_, constant, _)| *constant == "JSON")
             .collect();
-        assert!(json_uses.len() > 0, "Should find JSON in JSON::Parser pattern");
+        assert!(
+            json_uses.len() > 0,
+            "Should find JSON in JSON::Parser pattern"
+        );
 
         // Check for ActiveRecord module reference
-        let ar_uses: Vec<_> = uses.iter()
+        let ar_uses: Vec<_> = uses
+            .iter()
             .filter(|(_, constant, _)| *constant == "ActiveRecord")
             .collect();
-        assert!(ar_uses.len() > 0, "Should find ActiveRecord in ActiveRecord::Base pattern");
+        assert!(
+            ar_uses.len() > 0,
+            "Should find ActiveRecord in ActiveRecord::Base pattern"
+        );
     }
 
     #[test]
@@ -1936,21 +2293,32 @@ end
         let mut parser = RubyParser::new().expect("Failed to create parser");
         let uses = parser.find_uses(code);
 
-        println!("\n=== Chained Methods Test - Found {} constant uses ===", uses.len());
+        println!(
+            "\n=== Chained Methods Test - Found {} constant uses ===",
+            uses.len()
+        );
         for (caller, constant, range) in &uses {
-            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+            println!(
+                "  {} uses {} at {}:{}",
+                caller, constant, range.start_line, range.start_column
+            );
         }
 
         // Should find constant receivers even in chained calls
-        let user_uses: Vec<_> = uses.iter()
+        let user_uses: Vec<_> = uses
+            .iter()
             .filter(|(_, constant, _)| *constant == "User")
             .collect();
         assert!(user_uses.len() > 0, "Should find User in chained call");
 
-        let dp_uses: Vec<_> = uses.iter()
+        let dp_uses: Vec<_> = uses
+            .iter()
             .filter(|(_, constant, _)| *constant == "DataProcessor")
             .collect();
-        assert!(dp_uses.len() > 0, "Should find DataProcessor in chained call");
+        assert!(
+            dp_uses.len() > 0,
+            "Should find DataProcessor in chained call"
+        );
     }
 
     #[test]
@@ -1967,23 +2335,36 @@ end
         let mut parser = RubyParser::new().expect("Failed to create parser");
         let uses = parser.find_uses(code);
 
-        println!("\n=== Nested Calls Test - Found {} constant uses ===", uses.len());
+        println!(
+            "\n=== Nested Calls Test - Found {} constant uses ===",
+            uses.len()
+        );
         for (caller, constant, range) in &uses {
-            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+            println!(
+                "  {} uses {} at {}:{}",
+                caller, constant, range.start_line, range.start_column
+            );
         }
 
         // Should find all nested constants
-        let constants_found: Vec<&str> = uses.iter()
-            .map(|(_, constant, _)| *constant)
-            .collect();
+        let constants_found: Vec<&str> = uses.iter().map(|(_, constant, _)| *constant).collect();
 
         assert!(constants_found.contains(&"User"), "Should find User");
         assert!(constants_found.contains(&"Admin"), "Should find Admin");
-        assert!(constants_found.contains(&"Processor"), "Should find Processor");
+        assert!(
+            constants_found.contains(&"Processor"),
+            "Should find Processor"
+        );
         assert!(constants_found.contains(&"Config"), "Should find Config");
-        assert!(constants_found.contains(&"Settings"), "Should find Settings");
+        assert!(
+            constants_found.contains(&"Settings"),
+            "Should find Settings"
+        );
         assert!(constants_found.contains(&"Cache"), "Should find Cache");
-        assert!(constants_found.contains(&"Database"), "Should find Database");
+        assert!(
+            constants_found.contains(&"Database"),
+            "Should find Database"
+        );
     }
 
     #[test]
@@ -2001,13 +2382,23 @@ end
         let mut parser = RubyParser::new().expect("Failed to create parser");
         let uses = parser.find_uses(code);
 
-        println!("\n=== Nil Receivers Test - Found {} constant uses ===", uses.len());
+        println!(
+            "\n=== Nil Receivers Test - Found {} constant uses ===",
+            uses.len()
+        );
         for (caller, constant, range) in &uses {
-            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+            println!(
+                "  {} uses {} at {}:{}",
+                caller, constant, range.start_line, range.start_column
+            );
         }
 
         // Should find NO constant uses (all receivers are nil, self, or lowercase)
-        assert_eq!(uses.len(), 0, "Should not find any constant uses with nil/lowercase receivers");
+        assert_eq!(
+            uses.len(),
+            0,
+            "Should not find any constant uses with nil/lowercase receivers"
+        );
     }
 
     #[test]
@@ -2024,15 +2415,19 @@ end
         let mut parser = RubyParser::new().expect("Failed to create parser");
         let uses = parser.find_uses(code);
 
-        println!("\n=== Multi-Level Scope Test - Found {} constant uses ===", uses.len());
+        println!(
+            "\n=== Multi-Level Scope Test - Found {} constant uses ===",
+            uses.len()
+        );
         for (caller, constant, range) in &uses {
-            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+            println!(
+                "  {} uses {} at {}:{}",
+                caller, constant, range.start_line, range.start_column
+            );
         }
 
         // Should find module/constant references at each level
-        let constants_found: Vec<&str> = uses.iter()
-            .map(|(_, constant, _)| *constant)
-            .collect();
+        let constants_found: Vec<&str> = uses.iter().map(|(_, constant, _)| *constant).collect();
 
         assert!(constants_found.contains(&"App"), "Should find App");
         assert!(constants_found.contains(&"Data"), "Should find Data");
@@ -2054,9 +2449,15 @@ end
         let mut parser = RubyParser::new().expect("Failed to create parser");
         let uses = parser.find_uses(code);
 
-        println!("\n=== Mixed Case Test - Found {} constant uses ===", uses.len());
+        println!(
+            "\n=== Mixed Case Test - Found {} constant uses ===",
+            uses.len()
+        );
         for (caller, constant, range) in &uses {
-            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+            println!(
+                "  {} uses {} at {}:{}",
+                caller, constant, range.start_line, range.start_column
+            );
         }
 
         // Should only find ConstantName (uppercase start)
@@ -2092,20 +2493,39 @@ end
         let mut parser = RubyParser::new().expect("Failed to create parser");
         let uses = parser.find_uses(code);
 
-        println!("\n=== Function Context Test - Found {} constant uses ===", uses.len());
+        println!(
+            "\n=== Function Context Test - Found {} constant uses ===",
+            uses.len()
+        );
         for (caller, constant, range) in &uses {
-            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+            println!(
+                "  {} uses {} at {}:{}",
+                caller, constant, range.start_line, range.start_column
+            );
         }
 
         // Verify correct caller context tracking
-        let contexts: Vec<(&str, &str)> = uses.iter()
+        let contexts: Vec<(&str, &str)> = uses
+            .iter()
             .map(|(caller, constant, _)| (*caller, *constant))
             .collect();
 
-        assert!(contexts.contains(&("<module>", "TopLevel")), "Should track top-level context");
-        assert!(contexts.contains(&("instance_method", "InstanceLevel")), "Should track instance method context");
-        assert!(contexts.contains(&("class_method", "ClassMethodLevel")), "Should track class method context");
-        assert!(contexts.contains(&("standalone_function", "StandaloneLevel")), "Should track standalone function context");
+        assert!(
+            contexts.contains(&("<module>", "TopLevel")),
+            "Should track top-level context"
+        );
+        assert!(
+            contexts.contains(&("instance_method", "InstanceLevel")),
+            "Should track instance method context"
+        );
+        assert!(
+            contexts.contains(&("class_method", "ClassMethodLevel")),
+            "Should track class method context"
+        );
+        assert!(
+            contexts.contains(&("standalone_function", "StandaloneLevel")),
+            "Should track standalone function context"
+        );
     }
 
     #[test]
@@ -2167,42 +2587,343 @@ end
         let mut parser = RubyParser::new().expect("Failed to create parser");
         let uses = parser.find_uses(code);
 
-        println!("\n=== Real-World UrlFormatter Test - Found {} constant uses ===", uses.len());
+        println!(
+            "\n=== Real-World UrlFormatter Test - Found {} constant uses ===",
+            uses.len()
+        );
         for (caller, constant, range) in &uses {
-            println!("  {} uses {} at {}:{}", caller, constant, range.start_line, range.start_column);
+            println!(
+                "  {} uses {} at {}:{}",
+                caller, constant, range.start_line, range.start_column
+            );
         }
 
         // Verify we extract expected constants from real Ruby code
-        let constants_found: Vec<&str> = uses.iter()
-            .map(|(_, constant, _)| *constant)
-            .collect();
+        let constants_found: Vec<&str> = uses.iter().map(|(_, constant, _)| *constant).collect();
 
         // Core Ruby/external library constants used in method call patterns
         assert!(constants_found.contains(&"URI"), "Should find URI constant");
-        assert!(constants_found.contains(&"Addressable"), "Should find Addressable module");
+        assert!(
+            constants_found.contains(&"Addressable"),
+            "Should find Addressable module"
+        );
         assert!(constants_found.contains(&"CGI"), "Should find CGI constant");
-        assert!(constants_found.contains(&"KeywordReducer"), "Should find KeywordReducer class");
+        assert!(
+            constants_found.contains(&"KeywordReducer"),
+            "Should find KeywordReducer class"
+        );
         assert!(constants_found.contains(&"Seo"), "Should find Seo module");
-        assert!(constants_found.contains(&"Digest"), "Should find Digest module");
-        assert!(constants_found.contains(&"PostRank"), "Should find PostRank module");
-        assert!(constants_found.contains(&"OpenStruct"), "Should find OpenStruct class");
-        assert!(constants_found.contains(&"SecureRandom"), "Should find SecureRandom module");
+        assert!(
+            constants_found.contains(&"Digest"),
+            "Should find Digest module"
+        );
+        assert!(
+            constants_found.contains(&"PostRank"),
+            "Should find PostRank module"
+        );
+        assert!(
+            constants_found.contains(&"OpenStruct"),
+            "Should find OpenStruct class"
+        );
+        assert!(
+            constants_found.contains(&"SecureRandom"),
+            "Should find SecureRandom module"
+        );
 
         // Note: SETTINGS[:demo_domain] uses array/hash access, not method call pattern
         // Current implementation focuses on ConstantName.method_call patterns
 
         // Verify caller context for specific methods
-        let encode_uses: Vec<_> = uses.iter()
+        let encode_uses: Vec<_> = uses
+            .iter()
             .filter(|(caller, _, _)| *caller == "encode")
             .collect();
-        assert!(encode_uses.len() >= 2, "encode method should use multiple constants (URI, Addressable)");
+        assert!(
+            encode_uses.len() >= 2,
+            "encode method should use multiple constants (URI, Addressable)"
+        );
 
-        let display_url_uses: Vec<_> = uses.iter()
+        let display_url_uses: Vec<_> = uses
+            .iter()
             .filter(|(caller, _, _)| *caller == "display_url")
             .collect();
-        assert!(display_url_uses.len() >= 2, "display_url method should use CGI constant");
+        assert!(
+            display_url_uses.len() >= 2,
+            "display_url method should use CGI constant"
+        );
 
         // Ensure we're tracking relationships correctly - should find substantial uses
-        assert!(uses.len() >= 15, "Should find at least 15 constant uses in UrlFormatter (found {})", uses.len());
+        assert!(
+            uses.len() >= 15,
+            "Should find at least 15 constant uses in UrlFormatter (found {})",
+            uses.len()
+        );
+    }
+
+    #[test]
+    fn test_find_implementations_basic_mixins() {
+        let code = r#"
+module Loggable
+  def log(msg)
+    puts msg
+  end
+end
+
+module Cacheable
+end
+
+class User
+  include Loggable
+  extend Cacheable
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let implementations = parser.find_implementations(code);
+
+        println!(
+            "\n=== Basic Mixin Test - Found {} implementations ===",
+            implementations.len()
+        );
+        for (implementer, module_name, range) in &implementations {
+            println!(
+                "  {} mixes in {} at line {}",
+                implementer,
+                module_name,
+                range.start_line + 1
+            );
+        }
+
+        assert_eq!(
+            implementations.len(),
+            2,
+            "Should find 2 mixin implementations"
+        );
+
+        // Verify User includes Loggable
+        let user_loggable = implementations
+            .iter()
+            .find(|(impl_name, mod_name, _)| *impl_name == "User" && *mod_name == "Loggable");
+        assert!(user_loggable.is_some(), "User should include Loggable");
+
+        // Verify User extends Cacheable
+        let user_cacheable = implementations
+            .iter()
+            .find(|(impl_name, mod_name, _)| *impl_name == "User" && *mod_name == "Cacheable");
+        assert!(user_cacheable.is_some(), "User should extend Cacheable");
+    }
+
+    #[test]
+    fn test_find_implementations_qualified_names() {
+        let code = r#"
+module Features::Security
+end
+
+class Admin
+  include Features::Security
+  prepend AuditLog
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let implementations = parser.find_implementations(code);
+
+        println!(
+            "\n=== Qualified Names Test - Found {} implementations ===",
+            implementations.len()
+        );
+        for (implementer, module_name, range) in &implementations {
+            println!(
+                "  {} mixes in {} at line {}",
+                implementer,
+                module_name,
+                range.start_line + 1
+            );
+        }
+
+        assert_eq!(
+            implementations.len(),
+            2,
+            "Should find 2 mixin implementations"
+        );
+
+        // Verify qualified name is extracted correctly
+        let admin_security = implementations.iter().find(|(impl_name, mod_name, _)| {
+            *impl_name == "Admin" && *mod_name == "Features::Security"
+        });
+        assert!(
+            admin_security.is_some(),
+            "Admin should include Features::Security with qualified name"
+        );
+
+        // Verify prepend
+        let admin_audit = implementations
+            .iter()
+            .find(|(impl_name, mod_name, _)| *impl_name == "Admin" && *mod_name == "AuditLog");
+        assert!(admin_audit.is_some(), "Admin should prepend AuditLog");
+    }
+
+    #[test]
+    fn test_find_implementations_multiple_mixins() {
+        let code = r#"
+class Service
+  include A, B, C
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let implementations = parser.find_implementations(code);
+
+        println!(
+            "\n=== Multiple Mixins Test - Found {} implementations ===",
+            implementations.len()
+        );
+        for (implementer, module_name, range) in &implementations {
+            println!(
+                "  {} mixes in {} at line {}",
+                implementer,
+                module_name,
+                range.start_line + 1
+            );
+        }
+
+        assert_eq!(
+            implementations.len(),
+            3,
+            "Should find 3 mixin implementations from 'include A, B, C'"
+        );
+
+        // Verify all three modules are extracted
+        let modules: Vec<&str> = implementations
+            .iter()
+            .map(|(_, mod_name, _)| *mod_name)
+            .collect();
+        assert!(modules.contains(&"A"), "Should include A");
+        assert!(modules.contains(&"B"), "Should include B");
+        assert!(modules.contains(&"C"), "Should include C");
+    }
+
+    #[test]
+    fn test_find_implementations_nested_classes() {
+        let code = r#"
+module Application
+  class ServiceClass
+    include Loggable
+
+    class InnerClass
+      extend Cacheable
+    end
+  end
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let implementations = parser.find_implementations(code);
+
+        println!(
+            "\n=== Nested Classes Test - Found {} implementations ===",
+            implementations.len()
+        );
+        for (implementer, module_name, range) in &implementations {
+            println!(
+                "  {} mixes in {} at line {}",
+                implementer,
+                module_name,
+                range.start_line + 1
+            );
+        }
+
+        assert_eq!(
+            implementations.len(),
+            2,
+            "Should find 2 mixin implementations in nested classes"
+        );
+
+        // Verify ServiceClass includes Loggable
+        let service_loggable = implementations.iter().find(|(impl_name, mod_name, _)| {
+            *impl_name == "ServiceClass" && *mod_name == "Loggable"
+        });
+        assert!(
+            service_loggable.is_some(),
+            "ServiceClass should include Loggable"
+        );
+
+        // Verify InnerClass extends Cacheable
+        let inner_cacheable = implementations.iter().find(|(impl_name, mod_name, _)| {
+            *impl_name == "InnerClass" && *mod_name == "Cacheable"
+        });
+        assert!(
+            inner_cacheable.is_some(),
+            "InnerClass should extend Cacheable"
+        );
+    }
+
+    #[test]
+    fn test_find_implementations_comprehensive() {
+        // Test with the comprehensive.rb test file
+        let code = include_str!("../../../examples/ruby/comprehensive.rb");
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let implementations = parser.find_implementations(code);
+
+        println!(
+            "\n=== Comprehensive Ruby Test - Found {} implementations ===",
+            implementations.len()
+        );
+
+        // Show sample of implementations
+        for (implementer, module_name, range) in implementations.iter().take(10) {
+            println!(
+                "  {} mixes in {} at line {}",
+                implementer,
+                module_name,
+                range.start_line + 1
+            );
+        }
+        if implementations.len() > 10 {
+            println!("  ... and {} more", implementations.len() - 10);
+        }
+
+        // The comprehensive.rb file has 27 mixin statements (verified with grep)
+        // This includes: include, extend, and prepend with various patterns
+        assert!(
+            implementations.len() >= 27,
+            "Should find at least 27 mixin implementations in comprehensive.rb (found {})",
+            implementations.len()
+        );
+
+        // Verify some specific examples from comprehensive.rb
+
+        // Verify common mixins from the file
+        let has_loggable = implementations
+            .iter()
+            .any(|(_, mod_name, _)| *mod_name == "Loggable");
+        assert!(has_loggable, "Should find Loggable mixin");
+
+        // Verify qualified module names (e.g., Features::Security, Authentication::OAuth)
+        let has_qualified = implementations
+            .iter()
+            .any(|(_, mod_name, _)| mod_name.contains("::"));
+        assert!(
+            has_qualified,
+            "Should find qualified module names (e.g., Features::Security)"
+        );
+
+        // Verify prepend is detected
+        let has_prepend = implementations
+            .iter()
+            .any(|(_, mod_name, _)| *mod_name == "Auditable" || *mod_name == "TrackingA");
+        assert!(has_prepend, "Should find prepend mixins");
+
+        // Verify multiple mixins in single statement are all captured
+        // Look for cases where multiple modules are included at once
+        let implementers: std::collections::HashSet<&str> = implementations
+            .iter()
+            .map(|(impl_name, _, _)| *impl_name)
+            .collect();
+        assert!(
+            implementers.len() >= 10,
+            "Should find mixins in at least 10 different classes"
+        );
     }
 }

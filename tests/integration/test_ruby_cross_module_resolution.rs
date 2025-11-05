@@ -205,7 +205,10 @@ fn test_ruby_require_relative_resolution() {
     let symbol_module_path = "user";
 
     let matches = behavior.import_matches_symbol(import_path, symbol_module_path, Some("admin"));
-    assert!(matches, "require_relative 'user' should match 'user' module path");
+    assert!(
+        matches,
+        "require_relative 'user' should match 'user' module path"
+    );
 
     println!("✅ SUCCESS: Ruby require_relative resolution works!");
 }
@@ -347,7 +350,10 @@ fn test_ruby_module_path_from_file() {
     // Test 3: Nested modules
     let nested_path = Path::new("/project/lib/authentication/oauth/provider.rb");
     let module_path = behavior.module_path_from_file(nested_path, project_root);
-    assert_eq!(module_path, Some("authentication::oauth::provider".to_string()));
+    assert_eq!(
+        module_path,
+        Some("authentication::oauth::provider".to_string())
+    );
     println!("lib/authentication/oauth/provider.rb -> {:?}", module_path);
 
     // Test 4: rake file
@@ -367,9 +373,18 @@ fn test_ruby_visibility_cross_module() {
 
     // Test visibility parsing
     assert_eq!(behavior.parse_visibility("def foo"), Visibility::Public);
-    assert_eq!(behavior.parse_visibility("private def foo"), Visibility::Private);
-    assert_eq!(behavior.parse_visibility("protected def foo"), Visibility::Module);
-    assert_eq!(behavior.parse_visibility("public def foo"), Visibility::Public);
+    assert_eq!(
+        behavior.parse_visibility("private def foo"),
+        Visibility::Private
+    );
+    assert_eq!(
+        behavior.parse_visibility("protected def foo"),
+        Visibility::Module
+    );
+    assert_eq!(
+        behavior.parse_visibility("public def foo"),
+        Visibility::Public
+    );
 
     // Test that visibility affects resolution
     let file1 = FileId::new(1).unwrap();

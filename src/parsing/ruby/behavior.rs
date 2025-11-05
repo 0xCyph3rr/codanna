@@ -113,17 +113,20 @@ impl LanguageBehavior for RubyBehavior {
         if signature.contains("private ")
             || signature.starts_with("private ")
             || signature.contains("\nprivate\n")
-            || signature.contains("private\n") {
+            || signature.contains("private\n")
+        {
             Visibility::Private
         } else if signature.contains("protected ")
             || signature.starts_with("protected ")
             || signature.contains("\nprotected\n")
-            || signature.contains("protected\n") {
+            || signature.contains("protected\n")
+        {
             Visibility::Module // Ruby's protected is like module-level
         } else if signature.contains("public ")
             || signature.starts_with("public ")
             || signature.contains("\npublic\n")
-            || signature.contains("public\n") {
+            || signature.contains("public\n")
+        {
             Visibility::Public
         } else {
             // In Ruby, methods are public by default
@@ -746,7 +749,10 @@ mod tests {
 
         // Test 3: Check if .gemspec extension is recognized
         let gemspec_lang = registry.get_by_extension("gemspec");
-        assert!(gemspec_lang.is_some(), ".gemspec extension should be recognized");
+        assert!(
+            gemspec_lang.is_some(),
+            ".gemspec extension should be recognized"
+        );
         assert_eq!(gemspec_lang.unwrap().name(), "Ruby");
 
         // Test 4: Find Ruby language ID

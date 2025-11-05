@@ -410,6 +410,249 @@ class EdgeCases
   end
 end
 
+# ============================================================================
+# COMPREHENSIVE MIXIN TEST CASES (Issue #13)
+# Testing include, extend, and prepend with various patterns
+# Expected AST: call nodes with method names "include"/"extend"/"prepend"
+# ============================================================================
+
+# Additional modules for mixin testing
+module Loggable
+  def log(message)
+    puts "[LOG] #{message}"
+  end
+end
+
+module Serializable
+  def to_json
+    "{ json representation }"
+  end
+
+  def from_json(data)
+    "parsed: #{data}"
+  end
+end
+
+module Validatable
+  def validate
+    true
+  end
+
+  def validate!
+    validate || raise("Validation failed")
+  end
+end
+
+# Nested modules for qualified name testing
+module Features
+  module Security
+    def secure_hash(data)
+      "hashed: #{data}"
+    end
+  end
+
+  module Performance
+    def benchmark
+      start = Time.now
+      yield if block_given?
+      Time.now - start
+    end
+  end
+end
+
+# Multiple mixins in single statement - Class context
+class MultiMixinClass
+  # AST: call node with multiple arguments
+  include Loggable, Serializable, Validatable
+
+  def process
+    validate && log("processing") && to_json
+  end
+end
+
+# Multiple mixins with extend
+class ExtendMultiple
+  # AST: call node with multiple arguments (class methods)
+  extend Loggable, Serializable
+
+  def self.info
+    log("class info")
+    to_json
+  end
+end
+
+# Multiple prepend (prepend takes precedence over include)
+module TrackingA
+  def save
+    puts "TrackingA: before save"
+    super
+  end
+end
+
+module TrackingB
+  def save
+    puts "TrackingB: before save"
+    super
+  end
+end
+
+class MultiPrependClass
+  # AST: call with multiple arguments (precedence: TrackingB > TrackingA > original)
+  prepend TrackingB, TrackingA
+
+  def save
+    puts "Original save"
+    true
+  end
+end
+
+# Qualified module names (Module::Submodule syntax)
+class QualifiedInclude
+  # AST: call with scope_resolution in argument
+  include Features::Security
+  extend Features::Performance
+
+  def secure_operation(data)
+    secure_hash(data)
+  end
+
+  def self.timed_operation
+    benchmark { sleep(0.1) }
+  end
+end
+
+# Mixed qualified and simple names in one statement
+class MixedQualified
+  # AST: call with mixed argument types (simple + qualified)
+  include Loggable, Features::Security, Serializable
+
+  def secure_log(data)
+    log(secure_hash(data))
+  end
+end
+
+# Mixins in module context (not just classes)
+module ServiceModule
+  # AST: call within module body
+  include Loggable
+  extend Serializable
+
+  def service_action
+    log("service executing")
+  end
+
+  def self.describe
+    to_json
+  end
+end
+
+# Prepend in module context
+module ChainableModule
+  prepend Validatable
+
+  def execute
+    validate && perform_action
+  end
+
+  def perform_action
+    "action performed"
+  end
+end
+
+# Nested class with mixins
+module Application
+  class ServiceClass
+    # AST: call within nested class
+    include Loggable, Validatable
+    extend Features::Performance
+
+    def validated_action
+      validate && log("action")
+    end
+
+    def self.benchmark_action
+      benchmark { new.validated_action }
+    end
+  end
+
+  module Helpers
+    class UtilityClass
+      # AST: multiple call nodes within deeply nested class
+      prepend TrackingA
+      include Serializable
+      extend Features::Security
+
+      def save
+        to_json
+      end
+
+      def self.secure(data)
+        secure_hash(data)
+      end
+    end
+  end
+end
+
+# Singleton class with mixins
+class SingletonWithMixins
+  class << self
+    # AST: call within singleton_class body
+    include Loggable
+    extend Serializable
+
+    def singleton_log
+      log("from singleton")
+    end
+  end
+end
+
+# All three mixin types in one class
+class ComprehensiveMixins
+  # AST: multiple call nodes with different method names
+  prepend TrackingA              # Highest precedence
+  include Loggable, Validatable  # Middle precedence
+  extend Serializable            # Class methods
+
+  def workflow
+    validate && log("workflow") && save
+  end
+
+  def save
+    "saved"
+  end
+
+  def self.export
+    to_json
+  end
+end
+
+# Conditional mixins (edge case - valid Ruby)
+class ConditionalMixin
+  # AST: call within if body
+  if ENV['ENABLE_LOGGING']
+    include Loggable
+  end
+
+  # AST: call within unless body
+  unless ENV['DISABLE_VALIDATION']
+    include Validatable
+  end
+end
+
+# Mixin with inline module (advanced case)
+class InlineMixin
+  # AST: call with Module.new block argument
+  include Module.new {
+    def inline_method
+      "from inline module"
+    end
+
+    def another_inline
+      "also inline"
+    end
+  }
+end
+
 # Test execution
 if __FILE__ == $PROGRAM_NAME
   puts "Running comprehensive Ruby parser test"

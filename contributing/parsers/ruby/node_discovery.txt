@@ -1,7 +1,7 @@
 === Ruby Language ABI-15 COMPREHENSIVE NODE MAPPING ===
-  Generated: 2025-11-02 20:29:38 UTC
+  Generated: 2025-11-05 16:11:04 UTC
   ABI Version: 15
-  Node kind count: 87
+  Node kind count: 89
 
 === MODULE AND CLASS NODES ===
   ✓ module                              -> ID: 27
@@ -105,6 +105,7 @@
   ✓ +                                   -> ID: 84
   ✓ +=                                  -> ID: 60
   ✓ ,                                   -> ID: 16
+  ✓ -                                   -> ID: 97
   ✓ ->                                  -> ID: 127
   ✓ .                                   -> ID: 11
   ✓ :                                   -> ID: 24
@@ -125,6 +126,7 @@
   ✓ element_reference                   -> ID: 259
   ✓ end                                 -> ID: 13
   ✓ false                               -> ID: 116
+  ✓ float                               -> ID: 109
   ✓ hash                                -> ID: 323
   ✓ hash_key_symbol                     -> ID: 150
   ✓ integer                             -> ID: 108

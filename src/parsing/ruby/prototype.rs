@@ -4,8 +4,8 @@
 //! Scope: ONE feature (class extraction) to prove feasibility
 //! Note: This is NOT production code - hardcoded values acceptable, error handling skipped
 
-use crate::types::{FileId, Range, SymbolCounter, SymbolKind};
 use crate::symbol::{Symbol, Visibility};
+use crate::types::{FileId, Range, SymbolCounter, SymbolKind};
 use tree_sitter::{Node, Parser};
 
 /// Minimal Ruby parser prototype validating tree-sitter-ruby integration
@@ -29,7 +29,12 @@ impl RubyParserPrototype {
     /// 1. tree-sitter-ruby can parse Ruby syntax
     /// 2. Node traversal works correctly
     /// 3. Symbol extraction pipeline integrates properly
-    pub fn parse_classes(&mut self, code: &str, file_id: FileId, counter: &mut SymbolCounter) -> Vec<Symbol> {
+    pub fn parse_classes(
+        &mut self,
+        code: &str,
+        file_id: FileId,
+        counter: &mut SymbolCounter,
+    ) -> Vec<Symbol> {
         let tree = match self.parser.parse(code, None) {
             Some(tree) => tree,
             None => return Vec::new(),
@@ -46,20 +51,22 @@ impl RubyParserPrototype {
     /// - Node kind matching ("class")
     /// - Child node navigation (getting class name)
     /// - Range extraction for source location
-    fn extract_classes(&self, node: Node, source: &str, file_id: FileId, symbols: &mut Vec<Symbol>, counter: &mut SymbolCounter) {
+    fn extract_classes(
+        &self,
+        node: Node,
+        source: &str,
+        file_id: FileId,
+        symbols: &mut Vec<Symbol>,
+        counter: &mut SymbolCounter,
+    ) {
         // Validate tree-sitter-ruby "class" node detection
         if node.kind() == "class" {
             if let Some(name_node) = node.child_by_field_name("name") {
                 let name = &source[name_node.byte_range()];
                 let range = self.node_to_range(node);
 
-                let mut symbol = Symbol::new(
-                    counter.next_id(),
-                    name,
-                    SymbolKind::Class,
-                    file_id,
-                    range,
-                );
+                let mut symbol =
+                    Symbol::new(counter.next_id(), name, SymbolKind::Class, file_id, range);
 
                 // Set minimal required fields for validation
                 symbol.file_path = Box::from("prototype_test.rb");
@@ -133,12 +140,19 @@ end
         // comprehensive.rb has 12 class definitions: User, Admin, Configuration,
         // Cacheable (module, but shows traversal works), Article, DataProcessor,
         // DynamicModel, Report, AuditedUser, EdgeCases, etc.
-        assert!(symbols.len() >= 8, "Should extract at least 8 classes from comprehensive.rb, got {}", symbols.len());
+        assert!(
+            symbols.len() >= 8,
+            "Should extract at least 8 classes from comprehensive.rb, got {}",
+            symbols.len()
+        );
 
         // Verify specific classes are found
         let class_names: Vec<&str> = symbols.iter().map(|s| &*s.name).collect();
         assert!(class_names.contains(&"User"), "Should find User class");
         assert!(class_names.contains(&"Admin"), "Should find Admin class");
-        assert!(class_names.contains(&"Article"), "Should find Article class");
+        assert!(
+            class_names.contains(&"Article"),
+            "Should find Article class"
+        );
     }
 }
