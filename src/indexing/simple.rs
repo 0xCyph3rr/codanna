@@ -95,6 +95,8 @@ pub struct SimpleIndexer {
     file_behaviors: std::collections::HashMap<FileId, Box<dyn crate::parsing::LanguageBehavior>>,
     /// Indexed directory paths (canonicalized) to track which directories are currently indexed
     indexed_paths: std::collections::HashSet<std::path::PathBuf>,
+    /// Rails symbol table for autoloading support (Ruby-specific)
+    rails_symbol_table: Option<crate::parsing::ruby::RailsSymbolTable>,
 }
 
 impl Default for SimpleIndexer {
@@ -147,6 +149,7 @@ impl SimpleIndexer {
             file_languages: std::collections::HashMap::new(),
             file_behaviors: std::collections::HashMap::new(),
             indexed_paths: std::collections::HashSet::new(),
+            rails_symbol_table: None,
         };
 
         // Try to load symbol cache for fast lookups
@@ -191,6 +194,7 @@ impl SimpleIndexer {
             file_languages: std::collections::HashMap::new(),
             file_behaviors: std::collections::HashMap::new(),
             indexed_paths: std::collections::HashSet::new(),
+            rails_symbol_table: None,
         };
 
         // Resolution system now handled through LanguageBehavior:
@@ -2377,6 +2381,25 @@ impl SimpleIndexer {
             self.commit_tantivy_batch()?;
         }
 
+        // Build Rails symbol table for autoloading support (before resolution)
+        if !dry_run {
+            eprintln!("Building Rails symbol table for autoloading support...");
+            match crate::parsing::ruby::RailsSymbolTable::build(dir.as_ref()) {
+                Ok(table) => {
+                    if !table.is_empty() {
+                        eprintln!("Rails symbol table built successfully");
+                        self.rails_symbol_table = Some(table);
+                    } else {
+                        eprintln!("No Rails project detected, skipping Rails autoloading");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to build Rails symbol table: {}", e);
+                    // Continue without Rails support
+                }
+            }
+        }
+
         // Resolve cross-file relationships after all files are indexed
         if !dry_run {
             self.resolve_cross_file_relationships()?;
@@ -2554,6 +2577,26 @@ impl SimpleIndexer {
     fn build_resolution_context(&self, file_id: FileId) -> IndexResult<Box<dyn ResolutionScope>> {
         // Use behavior's build_resolution_context which handles imports with our new matching logic
         let behavior = self.get_behavior_for_file(file_id)?;
+
+        // Check if this is a Ruby file and we have Rails symbol table
+        if let Some(rails_table) = &self.rails_symbol_table {
+            // Check if this is a Ruby file by language ID
+            if let Some(lang_id) = self.file_languages.get(&file_id) {
+                let registry = get_registry().lock().unwrap();
+                if let Some(lang) = registry.get(*lang_id) {
+                    if lang.name() == "Ruby" {
+                        // We know it's Ruby, so we can use RubyBehavior for Rails resolution
+                        // Create a RubyBehavior instance to use for Rails-aware resolution
+                        let ruby_behavior = crate::parsing::ruby::RubyBehavior::default();
+                        return ruby_behavior.build_resolution_context_with_rails(
+                            file_id,
+                            &self.document_index,
+                            rails_table,
+                        );
+                    }
+                }
+            }
+        }
 
         // NEW: Check if we can use cache-based resolution
         if let Some(cache) = self.symbol_cache() {

@@ -596,6 +596,115 @@ impl LanguageBehavior for RubyBehavior {
     }
 }
 
+// Rails-specific methods for RubyBehavior (not part of trait)
+impl RubyBehavior {
+    /// Build resolution context with Rails autoloading support
+    ///
+    /// This extends the standard resolution context with Rails-autoloaded symbols,
+    /// enabling cross-file constant resolution without explicit require statements.
+    pub fn build_resolution_context_with_rails(
+        &self,
+        file_id: FileId,
+        document_index: &crate::storage::DocumentIndex,
+        rails_symbol_table: &crate::parsing::ruby::RailsSymbolTable,
+    ) -> crate::error::IndexResult<Box<dyn crate::parsing::ResolutionScope>> {
+        use crate::parsing::resolution::GenericResolutionContext;
+
+        // 1. Start with existing context from Issue #18 (imports)
+        let mut context = self.build_resolution_context(file_id, document_index)?;
+
+        // 2. If Rails symbol table is empty (non-Rails project), return existing context
+        if rails_symbol_table.is_empty() {
+            return Ok(context);
+        }
+
+        // 3. Get current file's namespace (from module_path)
+        let current_namespace = self
+            .get_module_path_for_file(file_id)
+            .unwrap_or_else(|| String::new());
+
+        // 4. Build namespace search list (current → parent → top-level)
+        let search_namespaces = self.build_namespace_search_list(&current_namespace);
+
+        if crate::config::is_global_debug_enabled() {
+            eprintln!(
+                "DEBUG: Rails resolution for file {:?}, namespace: {}, search list: {:?}",
+                file_id, current_namespace, search_namespaces
+            );
+        }
+
+        // 5. Add Rails autoloaded symbols to context
+        for namespace in &search_namespaces {
+            let constants = rails_symbol_table.get_constants_in_namespace(namespace);
+
+            for constant_name in constants {
+                // Get the short name for the symbol (last component of the constant)
+                let short_name = constant_name.rsplit("::").next().unwrap_or(constant_name);
+
+                // Look up the symbol in the document index by name
+                if let Ok(symbols) = document_index.find_symbols_by_name(short_name, None) {
+                    // Filter to find the symbol that matches this Rails constant
+                    // We need to match by module_path to ensure we get the right one
+                    for symbol in symbols {
+                        // Check if the symbol's module_path matches the constant name
+                        if let Some(ref module_path) = symbol.module_path {
+                            if module_path.as_ref() == constant_name
+                                || module_path.as_ref().ends_with(&format!("::{constant_name}"))
+                            {
+                                // Add to Package scope (same as imports in Issue #18)
+                                if let Some(mut_context) = context
+                                    .as_any_mut()
+                                    .downcast_mut::<GenericResolutionContext>()
+                                {
+                                    mut_context.add_symbol(
+                                        short_name.to_string(),
+                                        symbol.id,
+                                        crate::parsing::ScopeLevel::Package,
+                                    );
+                                }
+
+                                if crate::config::is_global_debug_enabled() {
+                                    eprintln!(
+                                        "DEBUG: Added Rails constant {} (id: {:?}) to resolution context",
+                                        short_name, symbol.id
+                                    );
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        Ok(context)
+    }
+
+    /// Build namespace search list for Rails constant resolution
+    ///
+    /// Returns namespaces in search order: current → parent → ... → top-level
+    /// Example: "Api::V1::User" → ["Api::V1::User", "Api::V1", "Api", ""]
+    fn build_namespace_search_list(&self, current: &str) -> Vec<String> {
+        let mut namespaces = Vec::new();
+
+        // Add current namespace
+        if !current.is_empty() {
+            namespaces.push(current.to_string());
+        }
+
+        // Add parent namespaces (Api::V1::User → Api::V1, Api)
+        let parts: Vec<&str> = current.split("::").collect();
+        for i in (1..parts.len()).rev() {
+            namespaces.push(parts[..i].join("::"));
+        }
+
+        // Add top-level (empty string represents global scope)
+        namespaces.push(String::new());
+
+        namespaces
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
