@@ -1,5 +1,5 @@
 === Ruby Language ABI-15 COMPREHENSIVE NODE MAPPING ===
-  Generated: 2025-10-28 18:11:56 UTC
+  Generated: 2025-11-02 20:29:38 UTC
   ABI Version: 15
   Node kind count: 87
 

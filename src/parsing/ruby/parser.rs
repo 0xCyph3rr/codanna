@@ -316,8 +316,8 @@ impl RubyParser {
         // Classes are public by default in Ruby
         symbol.visibility = SymbolVisibility::Public;
 
-        // TODO: Phase 4 - Extract documentation comment
-        // Ruby uses: # single-line, =begin...=end multi-line, YARD tags
+        // Extract documentation comment
+        symbol.doc_comment = self.extract_doc_comment(&node, code).map(|s| s.into());
 
         Some(symbol)
     }
@@ -350,7 +350,8 @@ impl RubyParser {
         // Modules are public by default in Ruby
         symbol.visibility = SymbolVisibility::Public;
 
-        // TODO: Phase 4 - Extract documentation comment
+        // Extract documentation comment
+        symbol.doc_comment = self.extract_doc_comment(&node, code).map(|s| s.into());
 
         Some(symbol)
     }
@@ -422,7 +423,8 @@ impl RubyParser {
         // Set visibility based on current context
         symbol.visibility = Self::convert_visibility(context.current_visibility());
 
-        // TODO: Phase 4 - Extract documentation comment
+        // Extract documentation comment
+        symbol.doc_comment = self.extract_doc_comment(&node, code).map(|s| s.into());
 
         Some(symbol)
     }
@@ -457,7 +459,8 @@ impl RubyParser {
         // Singleton methods are always public in Ruby unless explicitly marked
         symbol.visibility = SymbolVisibility::Public;
 
-        // TODO: Phase 4 - Extract documentation comment
+        // Extract documentation comment
+        symbol.doc_comment = self.extract_doc_comment(&node, code).map(|s| s.into());
 
         Some(symbol)
     }
@@ -924,11 +927,59 @@ impl LanguageParser for RubyParser {
         Language::Ruby
     }
 
-    fn extract_doc_comment(&self, _node: &Node, _code: &str) -> Option<String> {
-        // TODO: Phase 2 - Ruby documentation comments
-        // Ruby uses: # single-line comments, =begin...=end multi-line comments
-        // YARD documentation: # @param, # @return, etc.
-        None
+    fn extract_doc_comment(&self, node: &Node, code: &str) -> Option<String> {
+        // Look for Ruby documentation comments (# or =begin...=end)
+        // Collect consecutive comment nodes before the symbol definition
+        let mut comments = Vec::new();
+        let mut current = node.prev_sibling();
+
+        // Traverse backwards through previous siblings to collect comments
+        while let Some(prev) = current {
+            if prev.kind() == "comment" {
+                let comment_text = &code[prev.byte_range()];
+                comments.push(comment_text);
+                current = prev.prev_sibling();
+            } else {
+                // Stop at first non-comment node
+                break;
+            }
+        }
+
+        if comments.is_empty() {
+            return None;
+        }
+
+        // Reverse to get original order (we collected backwards)
+        comments.reverse();
+
+        // Clean and join comments
+        let cleaned_lines: Vec<String> = comments
+            .iter()
+            .flat_map(|comment| {
+                // Handle =begin...=end multi-line comments
+                if comment.starts_with("=begin") {
+                    comment
+                        .trim_start_matches("=begin")
+                        .trim_end_matches("=end")
+                        .lines()
+                        .map(|line| line.trim().to_string())
+                        .collect::<Vec<_>>()
+                } else {
+                    // Handle # single-line comments
+                    comment
+                        .lines()
+                        .map(|line| line.trim_start_matches('#').trim().to_string())
+                        .collect::<Vec<_>>()
+                }
+            })
+            .collect();
+
+        let result = cleaned_lines.join("\n").trim().to_string();
+        if result.is_empty() {
+            None
+        } else {
+            Some(result)
+        }
     }
 
     fn find_calls<'a>(&mut self, code: &'a str) -> Vec<(&'a str, &'a str, Range)> {
@@ -1609,5 +1660,80 @@ end
         assert_eq!(outer_const.unwrap().kind, SymbolKind::Constant);
         assert_eq!(inner_const.unwrap().kind, SymbolKind::Constant);
         assert_eq!(class_const.unwrap().kind, SymbolKind::Constant);
+    }
+
+    #[test]
+    fn test_doc_comment_extraction() {
+        let code = r#"
+# This is a User class
+# It manages user data
+class User
+  def initialize(name)
+    @name = name
+  end
+end
+
+# Calculate the sum of two numbers
+# @param a [Integer] first number
+# @param b [Integer] second number
+# @return [Integer] the sum
+def add(a, b)
+  a + b
+end
+
+=begin
+This is a multi-line comment
+describing the Configuration module
+It handles app configuration
+=end
+module Configuration
+  VERSION = "1.0.0"
+end
+
+# Simple single-line comment
+def simple_method
+  puts "hello"
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let mut counter = SymbolCounter::new();
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+
+        let symbols = parser.parse(code, file_id, &mut counter);
+
+        // Find symbols with doc comments
+        let user_class = symbols.iter().find(|s| s.name.as_ref() == "User");
+        let add_method = symbols.iter().find(|s| s.name.as_ref() == "add");
+        let config_module = symbols.iter().find(|s| s.name.as_ref() == "Configuration");
+        let simple_method = symbols.iter().find(|s| s.name.as_ref() == "simple_method");
+
+        // Test User class comment (multi-line single-line comments)
+        assert!(user_class.is_some(), "Should find User class");
+        let user_doc = user_class.unwrap().doc_comment.as_ref().map(|s| s.as_ref());
+        assert!(user_doc.is_some(), "User class should have doc comment");
+        assert!(user_doc.unwrap().contains("User class"), "Should contain 'User class'");
+        assert!(user_doc.unwrap().contains("manages user data"), "Should contain 'manages user data'");
+
+        // Test add method comment (YARD tags)
+        assert!(add_method.is_some(), "Should find add method");
+        let add_doc = add_method.unwrap().doc_comment.as_ref().map(|s| s.as_ref());
+        assert!(add_doc.is_some(), "add method should have doc comment");
+        assert!(add_doc.unwrap().contains("Calculate the sum"), "Should contain 'Calculate the sum'");
+        assert!(add_doc.unwrap().contains("@param a"), "Should preserve YARD @param tag");
+        assert!(add_doc.unwrap().contains("@return"), "Should preserve YARD @return tag");
+
+        // Test Configuration module comment (=begin...=end)
+        assert!(config_module.is_some(), "Should find Configuration module");
+        let config_doc = config_module.unwrap().doc_comment.as_ref().map(|s| s.as_ref());
+        assert!(config_doc.is_some(), "Configuration module should have doc comment");
+        assert!(config_doc.unwrap().contains("multi-line comment"), "Should contain 'multi-line comment'");
+        assert!(config_doc.unwrap().contains("Configuration module"), "Should contain 'Configuration module'");
+
+        // Test simple_method comment (single-line)
+        assert!(simple_method.is_some(), "Should find simple_method");
+        let simple_doc = simple_method.unwrap().doc_comment.as_ref().map(|s| s.as_ref());
+        assert!(simple_doc.is_some(), "simple_method should have doc comment");
+        assert_eq!(simple_doc.unwrap(), "Simple single-line comment", "Should match exact comment text");
     }
 }
