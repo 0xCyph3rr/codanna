@@ -641,37 +641,26 @@ impl RubyBehavior {
                 // Get the short name for the symbol (last component of the constant)
                 let short_name = constant_name.rsplit("::").next().unwrap_or(constant_name);
 
-                // Look up the symbol in the document index by name
-                if let Ok(symbols) = document_index.find_symbols_by_name(short_name, None) {
-                    // Filter to find the symbol that matches this Rails constant
-                    // We need to match by module_path to ensure we get the right one
-                    for symbol in symbols {
-                        // Check if the symbol's module_path matches the constant name
-                        if let Some(ref module_path) = symbol.module_path {
-                            if module_path.as_ref() == constant_name
-                                || module_path.as_ref().ends_with(&format!("::{constant_name}"))
-                            {
-                                // Add to Package scope (same as imports in Issue #18)
-                                if let Some(mut_context) = context
-                                    .as_any_mut()
-                                    .downcast_mut::<GenericResolutionContext>()
-                                {
-                                    mut_context.add_symbol(
-                                        short_name.to_string(),
-                                        symbol.id,
-                                        crate::parsing::ScopeLevel::Package,
-                                    );
-                                }
+                // O(1) HashMap lookup instead of expensive database query
+                // Pre-resolved SymbolIds eliminate the nested loop complexity
+                if let Some(symbol_id) = rails_symbol_table.get_symbol_id(constant_name) {
+                    // Add to Package scope (same as imports in Issue #18)
+                    if let Some(mut_context) = context
+                        .as_any_mut()
+                        .downcast_mut::<GenericResolutionContext>()
+                    {
+                        mut_context.add_symbol(
+                            short_name.to_string(),
+                            symbol_id,
+                            crate::parsing::ScopeLevel::Package,
+                        );
+                    }
 
-                                if crate::config::is_global_debug_enabled() {
-                                    eprintln!(
-                                        "DEBUG: Added Rails constant {} (id: {:?}) to resolution context",
-                                        short_name, symbol.id
-                                    );
-                                }
-                                break;
-                            }
-                        }
+                    if crate::config::is_global_debug_enabled() {
+                        eprintln!(
+                            "DEBUG: Added Rails constant {} (id: {:?}) to resolution context",
+                            short_name, symbol_id
+                        );
                     }
                 }
             }

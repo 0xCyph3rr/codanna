@@ -51,29 +51,45 @@ impl RailsProjectDetector {
 
     /// Detect if directory is a Rails project
     ///
+    /// Walks up directory tree to find Rails project root.
     /// Primary indicator: config/application.rb with Rails::Application
     /// Secondary: app/ directory + Gemfile with rails gem
     pub fn is_rails_project(&self) -> bool {
-        // Primary check: config/application.rb with Rails::Application
-        let app_rb = self.project_root.join("config/application.rb");
-        if app_rb.exists() {
-            if let Ok(contents) = fs::read_to_string(&app_rb) {
-                if contents.contains("Rails::Application") {
-                    return true;
+        self.find_rails_root(&self.project_root).is_some()
+    }
+
+    /// Walk up directory tree to find Rails project root
+    pub fn find_rails_root(&self, start_dir: &Path) -> Option<PathBuf> {
+        let mut current = start_dir;
+
+        loop {
+            // Primary check: config/application.rb with Rails::Application
+            let app_rb = current.join("config/application.rb");
+            if app_rb.exists() {
+                if let Ok(contents) = fs::read_to_string(&app_rb) {
+                    if contents.contains("Rails::Application") {
+                        return Some(current.to_path_buf());
+                    }
                 }
             }
-        }
 
-        // Fallback: Check for app/ directory + Gemfile with rails gem
-        let has_app_dir = self.project_root.join("app").is_dir();
-        let gemfile = self.project_root.join("Gemfile");
-        if has_app_dir && gemfile.exists() {
-            if let Ok(contents) = fs::read_to_string(&gemfile) {
-                return contents.contains("gem 'rails'") || contents.contains("gem \"rails\"");
+            // Fallback: Check for app/ directory + Gemfile with rails gem
+            let has_app_dir = current.join("app").is_dir();
+            let gemfile = current.join("Gemfile");
+            if has_app_dir && gemfile.exists() {
+                if let Ok(contents) = fs::read_to_string(&gemfile) {
+                    if contents.contains("gem 'rails'") || contents.contains("gem \"rails\"") {
+                        return Some(current.to_path_buf());
+                    }
+                }
+            }
+
+            // Walk up to parent directory
+            match current.parent() {
+                Some(parent) => current = parent,
+                None => return None,
             }
         }
-
-        false
     }
 
     /// Discover all Rails autoload paths
@@ -208,11 +224,16 @@ impl RailsInflector {
 /// Rails symbol table for O(1) constant resolution
 ///
 /// This table is built once during indexing and caches the mapping between
-/// Rails constants and their file locations, following Zeitwerk conventions.
+/// Rails constants and their SymbolIds, following Zeitwerk conventions.
 pub struct RailsSymbolTable {
     /// Map: constant_name → file_path
     /// Example: "UrlFormatter" → "app/models/lib/url_formatter.rb"
     constant_to_file: HashMap<String, PathBuf>,
+
+    /// Map: constant_name → SymbolId (O(1) lookup for hot path)
+    /// Example: "UrlFormatter" → SymbolId(42)
+    /// Pre-resolved during table construction to eliminate nested queries
+    constant_to_symbol: HashMap<String, crate::SymbolId>,
 
     /// Map: namespace → Vec<constant_names>
     /// Example: "Api::V1" → ["User", "Post", "Comment"]
@@ -235,6 +256,7 @@ impl RailsSymbolTable {
     pub fn empty() -> Self {
         Self {
             constant_to_file: HashMap::new(),
+            constant_to_symbol: HashMap::new(),
             namespace_index: HashMap::new(),
             file_to_constant: HashMap::new(),
             load_paths: Vec::new(),
@@ -246,24 +268,31 @@ impl RailsSymbolTable {
     ///
     /// This scans all Ruby files in Rails autoload paths and builds the
     /// constant → file mapping using Zeitwerk conventions.
+    /// Walks up directory tree from project_root to find actual Rails root.
     pub fn build(project_root: &Path) -> IndexResult<Self> {
         let detector = RailsProjectDetector::new(project_root);
 
-        if !detector.is_rails_project() {
-            // Not a Rails project, return empty table
-            eprintln!("DEBUG: Not a Rails project, skipping Rails autoloading support");
-            return Ok(Self::empty());
-        }
+        // Find actual Rails root by walking up directory tree
+        let rails_root = match detector.find_rails_root(project_root) {
+            Some(root) => root,
+            None => {
+                eprintln!("DEBUG: Not a Rails project, skipping Rails autoloading support");
+                return Ok(Self::empty());
+            }
+        };
 
-        eprintln!("DEBUG: Detected Rails project, building symbol table for autoloading");
+        eprintln!("DEBUG: Detected Rails project at {}, building symbol table for autoloading", rails_root.display());
 
-        let load_paths = detector.discover_load_paths();
+        // Use detected Rails root for load path discovery
+        let detector_at_root = RailsProjectDetector::new(&rails_root);
+        let load_paths = detector_at_root.discover_load_paths();
         let mut table = Self {
             constant_to_file: HashMap::new(),
+            constant_to_symbol: HashMap::new(),
             namespace_index: HashMap::new(),
             file_to_constant: HashMap::new(),
             load_paths: load_paths.clone(),
-            project_root: project_root.to_path_buf(),
+            project_root: rails_root.clone(),
         };
 
         // Scan all Ruby files in load paths
@@ -382,6 +411,93 @@ impl RailsSymbolTable {
     /// which can then be used to look up the actual SymbolId in the document index.
     pub fn resolve_constant(&self, constant_name: &str) -> Option<&PathBuf> {
         self.get_file_for_constant(constant_name)
+    }
+
+    /// Pre-resolve all constants to SymbolIds (O(N) bulk operation)
+    ///
+    /// This method performs bulk resolution of all constants to their SymbolIds
+    /// to eliminate expensive per-constant queries in the hot path.
+    /// Should be called once after table construction with the DocumentIndex.
+    ///
+    /// Returns number of constants successfully resolved.
+    pub fn resolve_symbol_ids(
+        &mut self,
+        document_index: &crate::storage::DocumentIndex,
+    ) -> IndexResult<usize> {
+        let mut resolved_count = 0;
+
+        eprintln!(
+            "DEBUG: Pre-resolving {} constants to SymbolIds...",
+            self.constant_to_file.len()
+        );
+
+        for (constant_name, file_path) in &self.constant_to_file {
+            // Get the short name for the symbol (last component of the constant)
+            let short_name = constant_name.rsplit("::").next().unwrap_or(constant_name);
+
+            // Look up the symbol in the document index by name
+            if let Ok(symbols) = document_index.find_symbols_by_name(short_name, Some("ruby")) {
+                // Find the symbol that matches this Rails constant
+                for symbol in symbols {
+                    // Match by module_path to ensure we get the right symbol
+                    if let Some(ref module_path) = symbol.module_path {
+                        if module_path.as_ref() == constant_name
+                            || module_path.as_ref().ends_with(&format!("::{constant_name}"))
+                        {
+                            // Store the resolved SymbolId
+                            self.constant_to_symbol
+                                .insert(constant_name.clone(), symbol.id);
+                            resolved_count += 1;
+
+                            if crate::config::is_global_debug_enabled() {
+                                eprintln!(
+                                    "DEBUG: Resolved {} → SymbolId({})",
+                                    constant_name,
+                                    symbol.id.value()
+                                );
+                            }
+                            break;
+                        }
+                    }
+
+                    // Fallback: match by file path if module_path doesn't match
+                    // This handles cases where the symbol's file matches the constant's file
+                    let symbol_path = Path::new(symbol.file_path.as_ref());
+                    if let Ok(relative_path) = symbol_path.strip_prefix(&self.project_root) {
+                        if relative_path == file_path.as_path() {
+                            self.constant_to_symbol
+                                .insert(constant_name.clone(), symbol.id);
+                            resolved_count += 1;
+
+                            if crate::config::is_global_debug_enabled() {
+                                eprintln!(
+                                    "DEBUG: Resolved {} → SymbolId({}) by file path",
+                                    constant_name,
+                                    symbol.id.value()
+                                );
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "DEBUG: Pre-resolved {}/{} constants to SymbolIds",
+            resolved_count,
+            self.constant_to_file.len()
+        );
+
+        Ok(resolved_count)
+    }
+
+    /// Get pre-resolved SymbolId for a constant (O(1) lookup)
+    ///
+    /// This is the hot path method used during relationship resolution.
+    /// Returns None if constant was not pre-resolved or doesn't exist.
+    pub fn get_symbol_id(&self, constant_name: &str) -> Option<crate::SymbolId> {
+        self.constant_to_symbol.get(constant_name).copied()
     }
 }
 

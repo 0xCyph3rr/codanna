@@ -2385,9 +2385,24 @@ impl SimpleIndexer {
         if !dry_run {
             eprintln!("Building Rails symbol table for autoloading support...");
             match crate::parsing::ruby::RailsSymbolTable::build(dir.as_ref()) {
-                Ok(table) => {
+                Ok(mut table) => {
                     if !table.is_empty() {
                         eprintln!("Rails symbol table built successfully");
+
+                        // Pre-resolve all constants to SymbolIds (O(N) bulk operation)
+                        // This eliminates expensive per-constant queries in the hot path
+                        match table.resolve_symbol_ids(&self.document_index) {
+                            Ok(resolved_count) => {
+                                eprintln!(
+                                    "Pre-resolved {} constants to SymbolIds",
+                                    resolved_count
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("Warning: Failed to resolve symbol IDs: {}", e);
+                            }
+                        }
+
                         self.rails_symbol_table = Some(table);
                     } else {
                         eprintln!("No Rails project detected, skipping Rails autoloading");
