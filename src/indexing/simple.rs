@@ -2379,30 +2379,16 @@ impl SimpleIndexer {
         // Commit any remaining files in the batch
         if files_in_batch > 0 {
             self.commit_tantivy_batch()?;
+            eprintln!("DEBUG: Tantivy batch committed, DocumentIndex cache should now be available");
         }
 
         // Build Rails symbol table for autoloading support (before resolution)
         if !dry_run {
             eprintln!("Building Rails symbol table for autoloading support...");
             match crate::parsing::ruby::RailsSymbolTable::build(dir.as_ref()) {
-                Ok(mut table) => {
+                Ok(table) => {
                     if !table.is_empty() {
                         eprintln!("Rails symbol table built successfully");
-
-                        // Pre-resolve all constants to SymbolIds (O(N) bulk operation)
-                        // This eliminates expensive per-constant queries in the hot path
-                        match table.resolve_symbol_ids(&self.document_index) {
-                            Ok(resolved_count) => {
-                                eprintln!(
-                                    "Pre-resolved {} constants to SymbolIds",
-                                    resolved_count
-                                );
-                            }
-                            Err(e) => {
-                                eprintln!("Warning: Failed to resolve symbol IDs: {}", e);
-                            }
-                        }
-
                         self.rails_symbol_table = Some(table);
                     } else {
                         eprintln!("No Rails project detected, skipping Rails autoloading");
@@ -2415,7 +2401,29 @@ impl SimpleIndexer {
             }
         }
 
-        // Resolve cross-file relationships after all files are indexed
+        // Pre-resolve Rails constants to SymbolIds BEFORE cross-file relationship resolution
+        // This must happen after symbols are committed to the database but BEFORE
+        // resolve_cross_file_relationships() so the cache is available during resolution
+        if !dry_run {
+            if let Some(ref mut table) = self.rails_symbol_table {
+                // Pre-resolve all constants to SymbolIds (O(N) bulk operation)
+                // This eliminates expensive per-constant queries in the hot path
+                match table.resolve_symbol_ids(&self.document_index) {
+                    Ok(resolved_count) => {
+                        eprintln!(
+                            "Pre-resolved {} constants to SymbolIds",
+                            resolved_count
+                        );
+                        eprintln!("DEBUG: Pre-resolution complete, cache now available for relationship resolution");
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to resolve symbol IDs: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Resolve cross-file relationships after all files are indexed and pre-resolution complete
         if !dry_run {
             self.resolve_cross_file_relationships()?;
         }
@@ -2603,8 +2611,11 @@ impl SimpleIndexer {
                         // We know it's Ruby, so we can use RubyBehavior for Rails resolution
                         // Create a RubyBehavior instance to use for Rails-aware resolution
                         let ruby_behavior = crate::parsing::ruby::RubyBehavior::default();
+
+                        // Pass cache as Option - method handles both cached and non-cached paths
                         return ruby_behavior.build_resolution_context_with_rails(
                             file_id,
+                            self.symbol_cache(),
                             &self.document_index,
                             rails_table,
                         );

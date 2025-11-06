@@ -605,13 +605,19 @@ impl RubyBehavior {
     pub fn build_resolution_context_with_rails(
         &self,
         file_id: FileId,
+        cache: Option<&crate::storage::symbol_cache::ConcurrentSymbolCache>,
         document_index: &crate::storage::DocumentIndex,
         rails_symbol_table: &crate::parsing::ruby::RailsSymbolTable,
     ) -> crate::error::IndexResult<Box<dyn crate::parsing::ResolutionScope>> {
         use crate::parsing::resolution::GenericResolutionContext;
 
         // 1. Start with existing context from Issue #18 (imports)
-        let mut context = self.build_resolution_context(file_id, document_index)?;
+        // Use cached version if cache is available, otherwise use standard version
+        let mut context = if let Some(cache) = cache {
+            self.build_resolution_context_with_cache(file_id, cache, document_index)?
+        } else {
+            self.build_resolution_context(file_id, document_index)?
+        };
 
         // 2. If Rails symbol table is empty (non-Rails project), return existing context
         if rails_symbol_table.is_empty() {
@@ -627,9 +633,10 @@ impl RubyBehavior {
         let search_namespaces = self.build_namespace_search_list(&current_namespace);
 
         if crate::config::is_global_debug_enabled() {
+            let cache_status = if cache.is_some() { "cached" } else { "standard" };
             eprintln!(
-                "DEBUG: Rails resolution for file {:?}, namespace: {}, search list: {:?}",
-                file_id, current_namespace, search_namespaces
+                "DEBUG: Rails resolution ({}) for file {:?}, namespace: {}, search list: {:?}",
+                cache_status, file_id, current_namespace, search_namespaces
             );
         }
 
