@@ -1,6 +1,6 @@
 # Ruby Grammar Analysis
 
-*Generated: 2025-11-05 16:11:04 UTC*
+*Generated: 2025-11-07 19:47:48 UTC*
 
 ## Statistics
 - Total nodes in grammar JSON: 134
@@ -16,18 +16,6 @@ These nodes are in examples and handled by parser:
 - method
 - module
 - singleton_method
-
-### Special Note: Ruby Mixin Tracking (include/extend/prepend)
-
-**IMPORTANT**: Ruby mixins (include, extend, prepend) are NOT distinct node types in the tree-sitter-ruby grammar. They are implemented as `call` nodes (kind_id: 265) with identifier children having names 'include', 'extend', or 'prepend'.
-
-The parser tracks mixin relationships through `find_implementations()` by:
-1. Detecting `call` nodes where method field matches 'include'/'extend'/'prepend'
-2. Extracting module names from the argument_list (supports both simple names like `Loggable` and qualified names like `Features::Security`)
-3. Tracking the implementer class/module via class_stack during AST traversal
-4. Returning tuples of (implementer_name, module_name, range)
-
-This is why the AUDIT_REPORT.md correctly shows include/extend/prepend as "❌ not found" - they don't exist as node types, but their functionality is fully implemented via call node inspection.
 
 ## ⚠️ Implementation Gaps
 These nodes appear in comprehensive.rb but aren't handled:
