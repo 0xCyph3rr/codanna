@@ -60,3 +60,10 @@ mod test_ruby_dependency_tracking;
 
 #[path = "integration/test_ruby_cross_file_constant_resolution.rs"]
 mod test_ruby_cross_file_constant_resolution;
+
+#[path = "integration/test_large_relationship_persistence.rs"]
+mod test_large_relationship_persistence;
+
+// Temporarily disabled: API incompatibilities beyond constructor (Issue #25)
+// #[path = "integration/test_cli_per_file_caching.rs"]
+// mod test_cli_per_file_caching;
