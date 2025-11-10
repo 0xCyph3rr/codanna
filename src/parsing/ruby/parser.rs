@@ -915,14 +915,38 @@ impl RubyParser {
         let method_name = &code[method_node.byte_range()];
         let range = self.node_to_range(node);
 
-        // Extract receiver if present (obj.method syntax)
-        let receiver = node
-            .child_by_field_name("receiver")
-            .map(|r| &code[r.byte_range()]);
+        // Extract receiver node and text if present (obj.method syntax)
+        let receiver_node = node.child_by_field_name("receiver");
+        let receiver = receiver_node.map(|r| &code[r.byte_range()]);
 
         let mut method_call = MethodCall::new(caller, method_name, range);
+
         if let Some(recv) = receiver {
             method_call = method_call.with_receiver(recv);
+
+            // Detect singleton method calls (Module.method_name patterns)
+            // Tree-sitter provides definitive node types for classification
+            if let Some(recv_node) = receiver_node {
+                let is_static = match recv_node.kind() {
+                    // Constant nodes: UrlFormatter, ENV, Time, etc.
+                    "constant" => true,
+                    // Scope resolution: Namespace::Module, Rails::Engine, etc.
+                    "scope_resolution" => true,
+                    // Identifier fallback: check first character for uppercase
+                    // (rare edge case - uppercase variables violate Ruby conventions)
+                    "identifier" => recv
+                        .chars()
+                        .next()
+                        .map(|c| c.is_ascii_uppercase())
+                        .unwrap_or(false),
+                    // All other cases: call nodes, literals, etc. are instance calls
+                    _ => false,
+                };
+
+                if is_static {
+                    method_call = method_call.static_method();
+                }
+            }
         }
 
         Some(method_call)
@@ -3165,5 +3189,272 @@ end
         let imports = parser.find_imports(code, file_id);
 
         assert_eq!(imports.len(), 0, "Should find no imports");
+    }
+
+    // Phase 4 tests - Singleton method call detection (Issue #24)
+
+    #[test]
+    fn test_singleton_method_call_simple_constant() {
+        let code = r#"
+def process_url
+  UrlFormatter.display_url("https://example.com")
+  Time.now
+  ENV.fetch("API_KEY")
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+        let mut counter = SymbolCounter::new();
+
+        // Parse to extract symbols first
+        parser.parse(code, file_id, &mut counter);
+
+        // Find method calls
+        let method_calls = parser.find_method_calls(code);
+
+        // Filter for the singleton calls
+        let static_calls: Vec<_> = method_calls
+            .iter()
+            .filter(|mc| mc.is_static)
+            .collect();
+
+        assert!(
+            static_calls.len() >= 3,
+            "Should detect at least 3 static method calls (UrlFormatter.display_url, Time.now, ENV.fetch)"
+        );
+
+        // Verify qualified names use :: separator for static calls
+        let qualified_names: Vec<_> = static_calls
+            .iter()
+            .map(|mc| mc.qualified_name())
+            .collect();
+
+        assert!(
+            qualified_names.iter().any(|name| name.contains("UrlFormatter::")),
+            "Should format UrlFormatter call with :: separator"
+        );
+        assert!(
+            qualified_names.iter().any(|name| name.contains("Time::")),
+            "Should format Time call with :: separator"
+        );
+        assert!(
+            qualified_names.iter().any(|name| name.contains("ENV::")),
+            "Should format ENV call with :: separator"
+        );
+    }
+
+    #[test]
+    fn test_singleton_method_call_nested_constants() {
+        let code = r#"
+def configure
+  Rails::Engine.isolate_namespace(MyEngine)
+  ActiveSupport::Cache.lookup_store(:redis)
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+        let mut counter = SymbolCounter::new();
+
+        parser.parse(code, file_id, &mut counter);
+        let method_calls = parser.find_method_calls(code);
+
+        let static_calls: Vec<_> = method_calls
+            .iter()
+            .filter(|mc| mc.is_static)
+            .collect();
+
+        assert!(
+            static_calls.len() >= 2,
+            "Should detect static calls on nested constants"
+        );
+
+        let qualified_names: Vec<_> = static_calls
+            .iter()
+            .map(|mc| mc.qualified_name())
+            .collect();
+
+        assert!(
+            qualified_names.iter().any(|name| name.contains("Rails::Engine::")),
+            "Should detect Rails::Engine.method as static"
+        );
+        assert!(
+            qualified_names.iter().any(|name| name.contains("ActiveSupport::Cache::")),
+            "Should detect ActiveSupport::Cache.method as static"
+        );
+    }
+
+    #[test]
+    fn test_instance_method_calls_not_static() {
+        let code = r#"
+def greet_user
+  user.name
+  order.calculate_total
+  items.each { |item| item.process }
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+        let mut counter = SymbolCounter::new();
+
+        parser.parse(code, file_id, &mut counter);
+        let method_calls = parser.find_method_calls(code);
+
+        // ALL calls should be instance calls (is_static = false)
+        let static_calls: Vec<_> = method_calls
+            .iter()
+            .filter(|mc| mc.is_static)
+            .collect();
+
+        assert_eq!(
+            static_calls.len(),
+            0,
+            "Lowercase variables should NOT be detected as static calls"
+        );
+    }
+
+    #[test]
+    fn test_chained_method_calls() {
+        let code = r#"
+def find_and_update
+  User.find(1).update(name: "New Name")
+  Article.where(status: "draft").first
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+        let mut counter = SymbolCounter::new();
+
+        parser.parse(code, file_id, &mut counter);
+        let method_calls = parser.find_method_calls(code);
+
+        let static_calls: Vec<_> = method_calls
+            .iter()
+            .filter(|mc| mc.is_static)
+            .collect();
+
+        // Only the first call in the chain (User.find, Article.where) should be static
+        assert!(
+            static_calls.len() >= 2,
+            "Should detect static calls at start of chain"
+        );
+
+        let qualified_names: Vec<_> = static_calls
+            .iter()
+            .map(|mc| mc.qualified_name())
+            .collect();
+
+        assert!(
+            qualified_names.iter().any(|name| name.contains("User::")),
+            "Should detect User.find as static"
+        );
+        assert!(
+            qualified_names.iter().any(|name| name.contains("Article::")),
+            "Should detect Article.where as static"
+        );
+    }
+
+    #[test]
+    fn test_all_caps_constants() {
+        let code = r#"
+def config_values
+  ENV.fetch("API_KEY")
+  CONFIG.load
+  REDIS.get("key")
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+        let mut counter = SymbolCounter::new();
+
+        parser.parse(code, file_id, &mut counter);
+        let method_calls = parser.find_method_calls(code);
+
+        let static_calls: Vec<_> = method_calls
+            .iter()
+            .filter(|mc| mc.is_static)
+            .collect();
+
+        assert!(
+            static_calls.len() >= 3,
+            "Should detect ALL_CAPS constants as static"
+        );
+    }
+
+    #[test]
+    fn test_mixed_static_and_instance_calls() {
+        let code = r#"
+def process_data
+  # Static calls
+  UrlFormatter.display_url(url)
+  Time.now
+
+  # Instance calls
+  user.save
+  order.total
+
+  # Chained
+  User.find(id).update(name: "test")
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+        let mut counter = SymbolCounter::new();
+
+        parser.parse(code, file_id, &mut counter);
+        let method_calls = parser.find_method_calls(code);
+
+        let static_calls: Vec<_> = method_calls
+            .iter()
+            .filter(|mc| mc.is_static)
+            .collect();
+
+        let instance_calls: Vec<_> = method_calls
+            .iter()
+            .filter(|mc| !mc.is_static)
+            .collect();
+
+        assert!(
+            static_calls.len() >= 3,
+            "Should detect static calls: UrlFormatter.display_url, Time.now, User.find"
+        );
+        assert!(
+            instance_calls.len() >= 3,
+            "Should detect instance calls: user.save, order.total, and chained calls"
+        );
+    }
+
+    #[test]
+    fn test_safe_navigation_operator() {
+        let code = r#"
+def process
+  user&.name
+  order&.calculate_total
+end
+"#;
+
+        let mut parser = RubyParser::new().expect("Failed to create parser");
+        let file_id = FileId::new(1).expect("Failed to create FileId");
+        let mut counter = SymbolCounter::new();
+
+        parser.parse(code, file_id, &mut counter);
+        let method_calls = parser.find_method_calls(code);
+
+        // Safe navigation on instance variables should NOT be static
+        let static_calls: Vec<_> = method_calls
+            .iter()
+            .filter(|mc| mc.is_static)
+            .collect();
+
+        assert_eq!(
+            static_calls.len(),
+            0,
+            "Safe navigation on variables should not be static"
+        );
     }
 }
