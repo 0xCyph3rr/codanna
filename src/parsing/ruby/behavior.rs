@@ -596,6 +596,111 @@ impl LanguageBehavior for RubyBehavior {
     }
 }
 
+// Rails-specific methods for RubyBehavior (not part of trait)
+impl RubyBehavior {
+    /// Build resolution context with Rails autoloading support
+    ///
+    /// This extends the standard resolution context with Rails-autoloaded symbols,
+    /// enabling cross-file constant resolution without explicit require statements.
+    pub fn build_resolution_context_with_rails(
+        &self,
+        file_id: FileId,
+        cache: Option<&crate::storage::symbol_cache::ConcurrentSymbolCache>,
+        document_index: &crate::storage::DocumentIndex,
+        rails_symbol_table: &crate::parsing::ruby::RailsSymbolTable,
+    ) -> crate::error::IndexResult<Box<dyn crate::parsing::ResolutionScope>> {
+        use crate::parsing::resolution::GenericResolutionContext;
+
+        // 1. Start with existing context from Issue #18 (imports)
+        // Use cached version if cache is available, otherwise use standard version
+        let mut context = if let Some(cache) = cache {
+            self.build_resolution_context_with_cache(file_id, cache, document_index)?
+        } else {
+            self.build_resolution_context(file_id, document_index)?
+        };
+
+        // 2. If Rails symbol table is empty (non-Rails project), return existing context
+        if rails_symbol_table.is_empty() {
+            return Ok(context);
+        }
+
+        // 3. Get current file's namespace (from module_path)
+        let current_namespace = self
+            .get_module_path_for_file(file_id)
+            .unwrap_or_else(|| String::new());
+
+        // 4. Build namespace search list (current → parent → top-level)
+        let search_namespaces = self.build_namespace_search_list(&current_namespace);
+
+        if crate::config::is_global_debug_enabled() {
+            let cache_status = if cache.is_some() { "cached" } else { "standard" };
+            eprintln!(
+                "DEBUG: Rails resolution ({}) for file {:?}, namespace: {}, search list: {:?}",
+                cache_status, file_id, current_namespace, search_namespaces
+            );
+        }
+
+        // 5. Add Rails autoloaded symbols to context
+        for namespace in &search_namespaces {
+            let constants = rails_symbol_table.get_constants_in_namespace(namespace);
+
+            for constant_name in constants {
+                // Get the short name for the symbol (last component of the constant)
+                let short_name = constant_name.rsplit("::").next().unwrap_or(constant_name);
+
+                // O(1) HashMap lookup instead of expensive database query
+                // Pre-resolved SymbolIds eliminate the nested loop complexity
+                if let Some(symbol_id) = rails_symbol_table.get_symbol_id(constant_name) {
+                    // Add to Package scope (same as imports in Issue #18)
+                    if let Some(mut_context) = context
+                        .as_any_mut()
+                        .downcast_mut::<GenericResolutionContext>()
+                    {
+                        mut_context.add_symbol(
+                            short_name.to_string(),
+                            symbol_id,
+                            crate::parsing::ScopeLevel::Package,
+                        );
+                    }
+
+                    if crate::config::is_global_debug_enabled() {
+                        eprintln!(
+                            "DEBUG: Added Rails constant {} (id: {:?}) to resolution context",
+                            short_name, symbol_id
+                        );
+                    }
+                }
+            }
+        }
+
+        Ok(context)
+    }
+
+    /// Build namespace search list for Rails constant resolution
+    ///
+    /// Returns namespaces in search order: current → parent → ... → top-level
+    /// Example: "Api::V1::User" → ["Api::V1::User", "Api::V1", "Api", ""]
+    fn build_namespace_search_list(&self, current: &str) -> Vec<String> {
+        let mut namespaces = Vec::new();
+
+        // Add current namespace
+        if !current.is_empty() {
+            namespaces.push(current.to_string());
+        }
+
+        // Add parent namespaces (Api::V1::User → Api::V1, Api)
+        let parts: Vec<&str> = current.split("::").collect();
+        for i in (1..parts.len()).rev() {
+            namespaces.push(parts[..i].join("::"));
+        }
+
+        // Add top-level (empty string represents global scope)
+        namespaces.push(String::new());
+
+        namespaces
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

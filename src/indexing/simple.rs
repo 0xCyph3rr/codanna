@@ -95,6 +95,8 @@ pub struct SimpleIndexer {
     file_behaviors: std::collections::HashMap<FileId, Box<dyn crate::parsing::LanguageBehavior>>,
     /// Indexed directory paths (canonicalized) to track which directories are currently indexed
     indexed_paths: std::collections::HashSet<std::path::PathBuf>,
+    /// Rails symbol table for autoloading support (Ruby-specific)
+    rails_symbol_table: Option<crate::parsing::ruby::RailsSymbolTable>,
 }
 
 impl Default for SimpleIndexer {
@@ -147,6 +149,7 @@ impl SimpleIndexer {
             file_languages: std::collections::HashMap::new(),
             file_behaviors: std::collections::HashMap::new(),
             indexed_paths: std::collections::HashSet::new(),
+            rails_symbol_table: None,
         };
 
         // Try to load symbol cache for fast lookups
@@ -191,6 +194,7 @@ impl SimpleIndexer {
             file_languages: std::collections::HashMap::new(),
             file_behaviors: std::collections::HashMap::new(),
             indexed_paths: std::collections::HashSet::new(),
+            rails_symbol_table: None,
         };
 
         // Resolution system now handled through LanguageBehavior:
@@ -445,8 +449,9 @@ impl SimpleIndexer {
         match self.index_file_internal(path, force) {
             Ok(result) => {
                 self.commit_tantivy_batch()?;
-                // Resolve relationships after committing
-                self.resolve_cross_file_relationships()?;
+                // TIMING FIX: Do NOT resolve relationships in per-file indexing (CLI path)
+                // Resolution must happen AFTER Rails pre-resolution completes in batch path
+                eprintln!("[DEBUG:CLI-PATH] Skipping per-file resolution, queue size: {}", self.unresolved_relationships.len());
                 Ok(result)
             }
             Err(e) => {
@@ -1115,14 +1120,21 @@ impl SimpleIndexer {
             });
 
             let kind = behavior.map_relationship("calls");
+            // Use qualified name for static calls (e.g., "UrlFormatter::display_url")
+            // to properly track module-level singleton method relationships
+            let target_name = if method_call.is_static {
+                method_call.qualified_name()
+            } else {
+                method_call.method_name.clone()
+            };
             if added.insert((
                 method_call.caller.clone(),
-                method_call.method_name.clone(),
+                target_name.clone(),
                 kind,
             )) {
                 self.add_relationships_by_name(
                     &method_call.caller,
-                    &method_call.method_name,
+                    &target_name,
                     file_id,
                     kind,
                     metadata,
@@ -1590,6 +1602,7 @@ impl SimpleIndexer {
         // This allows us to:
         // 1. Wait until all symbols in the batch are searchable
         // 2. Use import context for accurate resolution
+        eprintln!("[DEBUG:COLLECT] Adding unresolved relationship: {} -> {} (kind: {:?})", from_name, to_name, kind);
         debug_print!(
             self,
             "Adding unresolved relationship: {} -> {} (kind: {:?})",
@@ -2375,9 +2388,51 @@ impl SimpleIndexer {
         // Commit any remaining files in the batch
         if files_in_batch > 0 {
             self.commit_tantivy_batch()?;
+            eprintln!("DEBUG: Tantivy batch committed, DocumentIndex cache should now be available");
         }
 
-        // Resolve cross-file relationships after all files are indexed
+        // Build Rails symbol table for autoloading support (before resolution)
+        if !dry_run {
+            eprintln!("Building Rails symbol table for autoloading support...");
+            match crate::parsing::ruby::RailsSymbolTable::build(dir.as_ref()) {
+                Ok(table) => {
+                    if !table.is_empty() {
+                        eprintln!("Rails symbol table built successfully");
+                        self.rails_symbol_table = Some(table);
+                    } else {
+                        eprintln!("No Rails project detected, skipping Rails autoloading");
+                    }
+                }
+                Err(e) => {
+                    eprintln!("Warning: Failed to build Rails symbol table: {}", e);
+                    // Continue without Rails support
+                }
+            }
+        }
+
+        // Pre-resolve Rails constants to SymbolIds BEFORE cross-file relationship resolution
+        // This must happen after symbols are committed to the database but BEFORE
+        // resolve_cross_file_relationships() so the cache is available during resolution
+        if !dry_run {
+            if let Some(ref mut table) = self.rails_symbol_table {
+                // Pre-resolve all constants to SymbolIds (O(N) bulk operation)
+                // This eliminates expensive per-constant queries in the hot path
+                match table.resolve_symbol_ids(&self.document_index) {
+                    Ok(resolved_count) => {
+                        eprintln!(
+                            "Pre-resolved {} constants to SymbolIds",
+                            resolved_count
+                        );
+                        eprintln!("[DEBUG:RAILS-PRERESOLUTION] Pre-resolution complete, unresolved queue size: {}", self.unresolved_relationships.len());
+                    }
+                    Err(e) => {
+                        eprintln!("Warning: Failed to resolve symbol IDs: {}", e);
+                    }
+                }
+            }
+        }
+
+        // Resolve cross-file relationships after all files are indexed and pre-resolution complete
         if !dry_run {
             self.resolve_cross_file_relationships()?;
         }
@@ -2555,6 +2610,29 @@ impl SimpleIndexer {
         // Use behavior's build_resolution_context which handles imports with our new matching logic
         let behavior = self.get_behavior_for_file(file_id)?;
 
+        // Check if this is a Ruby file and we have Rails symbol table
+        if let Some(rails_table) = &self.rails_symbol_table {
+            // Check if this is a Ruby file by language ID
+            if let Some(lang_id) = self.file_languages.get(&file_id) {
+                let registry = get_registry().lock().unwrap();
+                if let Some(lang) = registry.get(*lang_id) {
+                    if lang.name() == "Ruby" {
+                        // We know it's Ruby, so we can use RubyBehavior for Rails resolution
+                        // Create a RubyBehavior instance to use for Rails-aware resolution
+                        let ruby_behavior = crate::parsing::ruby::RubyBehavior::default();
+
+                        // Pass cache as Option - method handles both cached and non-cached paths
+                        return ruby_behavior.build_resolution_context_with_rails(
+                            file_id,
+                            self.symbol_cache(),
+                            &self.document_index,
+                            rails_table,
+                        );
+                    }
+                }
+            }
+        }
+
         // NEW: Check if we can use cache-based resolution
         if let Some(cache) = self.symbol_cache() {
             // Build context with cache (fast path)
@@ -2569,406 +2647,101 @@ impl SimpleIndexer {
     fn resolve_cross_file_relationships(&mut self) -> IndexResult<()> {
         // Process all unresolved relationships
         let unresolved = std::mem::take(&mut self.unresolved_relationships);
-
-        eprintln!(
-            "Resolving cross-file relationships: {} unresolved entries",
-            unresolved.len()
-        );
-        debug_print!(
-            self,
-            "resolve_cross_file_relationships: {} unresolved relationships",
-            unresolved.len()
-        );
+        eprintln!("[DEBUG:RESOLUTION] Starting resolution with {} unresolved entries", unresolved.len());
 
         if unresolved.is_empty() {
-            eprintln!("DEBUG: No unresolved relationships to process");
             return Ok(());
         }
 
         // Start a batch for relationship updates
         self.start_tantivy_batch()?;
-
         let mut resolved_count = 0;
-        let mut skipped_count = 0;
-        let total_unresolved = unresolved.len();
-
-        let progress = if total_unresolved > 0 {
-            let options = ProgressBarOptions::default()
-                .with_style(ProgressBarStyle::VerticalSolid)
-                .with_width(28);
-            let bar = Arc::new(ProgressBar::with_options(
-                total_unresolved as u64,
-                "relationships",
-                "resolved",
-                "skipped",
-                options,
-            ));
-            let status = StatusLine::new(Arc::clone(&bar));
-            Some((bar, status))
-        } else {
-            None
-        };
 
         // Group relationships by file for efficient context building
-        let mut relationships_by_file: std::collections::HashMap<
-            FileId,
-            Vec<UnresolvedRelationship>,
-        > = std::collections::HashMap::new();
+        let mut relationships_by_file: std::collections::HashMap<FileId, Vec<UnresolvedRelationship>> =
+            std::collections::HashMap::new();
         for rel in unresolved {
-            relationships_by_file
-                .entry(rel.file_id)
-                .or_default()
-                .push(rel);
+            relationships_by_file.entry(rel.file_id).or_default().push(rel);
         }
 
         // Symbol lookup cache to avoid millions of duplicate Tantivy queries
-        // Maps symbol_name -> Vec<Symbol>
         let mut symbol_lookup_cache: std::collections::HashMap<String, Vec<Symbol>> =
             std::collections::HashMap::new();
 
+        // Target resolution cache to avoid duplicate resolution operations
+        let mut target_resolution_cache: std::collections::HashMap<(String, String, RelationKind), Option<SymbolId>> =
+            std::collections::HashMap::new();
+
+        let mut cache_hits = 0;
+        let mut cache_misses = 0;
+
         // Process each file's relationships with its resolution context
         for (file_id, file_relationships) in relationships_by_file {
-            // Build resolution context for this file
             let context = self.build_resolution_context(file_id)?;
 
             for rel in file_relationships {
-                if let Some((bar, _)) = &progress {
-                    bar.inc();
-                }
-
-                debug_print!(
-                    self,
-                    "Processing relationship: {} -> {} (kind: {:?}, file: {:?})",
-                    rel.from_name,
-                    rel.to_name,
-                    rel.kind,
-                    rel.file_id
-                );
-
-                // Find 'from' symbols - these should be in the current file
-                // Normalize caller name via language behavior (handles synthetic names like "<module>")
+                // Find 'from' symbols
                 let behavior_for_file = self.get_behavior_for_file(file_id)?;
-                let from_query_name =
-                    behavior_for_file.normalize_caller_name(&rel.from_name, file_id);
+                let from_query_name = behavior_for_file.normalize_caller_name(&rel.from_name, file_id);
 
                 // Check cache first to avoid duplicate Tantivy queries
-                let all_from_symbols =
-                    if let Some(cached) = symbol_lookup_cache.get(&from_query_name) {
-                        cached.clone()
-                    } else {
-                        // Cache miss - query Tantivy and cache the result
-                        let symbols = self
-                            .document_index
-                            .find_symbols_by_name(&from_query_name, None)
-                            .map_err(|e| IndexError::TantivyError {
-                                operation: "find_symbols_by_name".to_string(),
-                                cause: e.to_string(),
-                            })?;
-                        symbol_lookup_cache.insert(from_query_name.clone(), symbols.clone());
-                        symbols
-                    };
-
-                debug_print!(
-                    self,
-                    "Looking for '{}' symbols, found {} total",
-                    from_query_name,
-                    all_from_symbols.len()
-                );
-                for s in &all_from_symbols {
-                    debug_print!(
-                        self,
-                        "  - Symbol '{}' in file_id {:?} (looking for {:?})",
-                        s.name,
-                        s.file_id,
-                        file_id
-                    );
-                }
-
-                // Filter to only symbols from the current file
-                let from_symbols: Vec<_> = all_from_symbols
-                    .into_iter()
-                    .filter(|s| s.file_id == file_id)
-                    .collect();
-
-                debug_print!(
-                    self,
-                    "Found {} from_symbols in current file",
-                    from_symbols.len()
-                );
-
-                if from_symbols.is_empty() && rel.kind == RelationKind::Calls {
-                    debug_print!(
-                        self,
-                        "WARNING: No '{}' symbol found in file {:?} for Calls relationship to '{}'",
-                        from_query_name,
-                        file_id,
-                        rel.to_name
-                    );
-                }
-
-                // Use the clean resolution API that delegates to language-specific logic
-                let to_symbol_id = if rel.kind == RelationKind::Calls && from_symbols.len() == 1 {
-                    // Special handling for method calls with enhanced resolution
-                    debug_print!(self, "Resolving as method call: '{}'", rel.to_name);
-                    let res = self.resolve_method_call_enhanced(
-                        &rel.to_name,
-                        &rel.from_name,
-                        file_id,
-                        context.as_ref(),
-                    );
-                    debug_print!(
-                        self,
-                        "resolve_method_call_enhanced returned: {:?} for {}",
-                        res,
-                        rel.to_name
-                    );
-                    if res.is_none() {
-                        debug_print!(
-                            self,
-                            "Resolution failed, trying external mapping for {}",
-                            rel.to_name
-                        );
-                        // Try external mapping as a fallback
-                        if let Some(behavior) = self.file_behaviors.get(&file_id) {
-                            // Build a better external key using MethodCall receiver if available
-                            let to_key = if let Some(method_calls) =
-                                self.method_calls_by_file.get(&file_id)
-                            {
-                                // O(1) hashmap lookup by caller and method name
-                                let caller_name =
-                                    from_symbols.first().map(|s| s.name.as_ref()).unwrap_or("");
-                                let key = (caller_name.to_string(), rel.to_name.to_string());
-                                if let Some(mc) = method_calls.get(&key) {
-                                    if let Some(recv) = &mc.receiver {
-                                        format!("{recv}.{}", mc.method_name)
-                                    } else {
-                                        rel.to_name.to_string()
-                                    }
-                                } else {
-                                    rel.to_name.to_string()
-                                }
-                            } else {
-                                rel.to_name.to_string()
-                            };
-
-                            debug_print!(
-                                self,
-                                "Trying to resolve external call target: '{}' for file {:?}",
-                                to_key,
-                                file_id
-                            );
-                            if let Some((module_path, symbol_name)) =
-                                behavior.resolve_external_call_target(&to_key, file_id)
-                            {
-                                // Skip external symbol creation for resolved external calls
-                                debug_print!(
-                                    self,
-                                    "Skipping external symbol for resolved call: {} -> {}::{}",
-                                    to_key,
-                                    module_path,
-                                    symbol_name
-                                );
-                                None
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
-                    } else {
-                        res
-                    }
+                let all_from_symbols = if let Some(cached) = symbol_lookup_cache.get(&from_query_name) {
+                    cache_hits += 1;
+                    cached.clone()
                 } else {
-                    // Delegate all relationship resolution to the language-specific context
-                    // This includes Defines, Implements, Extends, and other relationships
-                    debug_print!(
-                        self,
-                        "Resolving relationship: {} -> {} (kind: {:?})",
-                        rel.from_name,
-                        rel.to_name,
-                        rel.kind
-                    );
-                    let result = context.resolve_relationship(
-                        &rel.from_name,
-                        &rel.to_name,
-                        rel.kind,
-                        file_id,
-                    );
-                    debug_print!(self, "Resolution result: {:?}", result);
-                    // If unresolved call, try language behavior external mapping
-                    if result.is_none() && rel.kind == RelationKind::Calls {
-                        if let Some(behavior) = self.file_behaviors.get(&file_id) {
-                            if let Some((module_path, symbol_name)) =
-                                behavior.resolve_external_call_target(&rel.to_name, file_id)
-                            {
-                                // Skip external symbol creation for mapped external calls
-                                debug_print!(
-                                    self,
-                                    "Skipping external symbol for mapped call: {} -> {}::{}",
-                                    rel.to_name,
-                                    module_path,
-                                    symbol_name
-                                );
-                                None
-                            } else {
-                                None
-                            }
-                        } else {
-                            None
-                        }
+                    cache_misses += 1;
+                    let symbols = self.document_index.find_symbols_by_name(&from_query_name, None)
+                        .map_err(|e| IndexError::TantivyError { operation: "find_symbols_by_name".to_string(), cause: e.to_string() })?;
+                    symbol_lookup_cache.insert(from_query_name.clone(), symbols.clone());
+                    symbols
+                };
+                let from_symbols: Vec<_> = all_from_symbols.into_iter().filter(|s| s.file_id == file_id).collect();
+
+                // Resolve target symbol with caching
+                let cache_key = (rel.from_name.to_string(), rel.to_name.to_string(), rel.kind);
+                let to_symbol_id = if let Some(cached_id) = target_resolution_cache.get(&cache_key) {
+                    cache_hits += 1;
+                    *cached_id
+                } else {
+                    cache_misses += 1;
+                    let resolved_id = if rel.kind == RelationKind::Calls && from_symbols.len() == 1 {
+                        self.resolve_method_call_enhanced(&rel.to_name, &rel.from_name, file_id, context.as_ref())
                     } else {
-                        result
-                    }
+                        context.resolve_relationship(&rel.from_name, &rel.to_name, rel.kind, file_id)
+                    };
+                    target_resolution_cache.insert(cache_key, resolved_id);
+                    resolved_id
                 };
 
-                let to_symbol_id = match to_symbol_id {
-                    Some(id) => {
-                        debug_print!(
-                            self,
-                            "Resolved target symbol '{}' to ID: {:?}",
-                            rel.to_name,
-                            id
-                        );
-                        id
-                    }
-                    None => {
-                        debug_print!(
-                            self,
-                            "Failed to resolve target symbol '{}' - skipping",
-                            rel.to_name
-                        );
-                        // Symbol not in scope - skip this relationship
-                        skipped_count += 1;
-                        if let Some((bar, _)) = &progress {
-                            bar.add_extra2(1);
-                        }
-                        continue;
-                    }
-                };
-
-                // Get the full symbol data
-                debug_print!(self, "Looking up symbol by ID: {:?}", to_symbol_id);
-                let to_symbol = match self
-                    .document_index
-                    .find_symbol_by_id(to_symbol_id)
-                    .map_err(|e| IndexError::TantivyError {
-                        operation: "find_symbol_by_id".to_string(),
-                        cause: e.to_string(),
-                    })? {
-                    Some(symbol) => {
-                        debug_print!(self, "Found target symbol: {}", symbol.name);
-                        symbol
-                    }
-                    None => {
-                        debug_print!(self, "Target symbol not found in index - skipping");
-                        skipped_count += 1;
-                        if let Some((bar, _)) = &progress {
-                            bar.add_extra2(1);
-                        }
-                        continue;
-                    }
-                };
-
-                // Process with our filtering logic
-                debug_print!(self, "Processing {} from symbols", from_symbols.len());
-                for from_symbol in &from_symbols {
-                    debug_print!(
-                        self,
-                        "Checking relationship from {} to {}",
-                        from_symbol.name,
-                        to_symbol.name
-                    );
-
-                    // Check symbol kind compatibility
-                    if !Self::is_compatible_relationship(from_symbol.kind, to_symbol.kind, rel.kind)
-                    {
-                        debug_print!(
-                            self,
-                            "Incompatible relationship: {} ({:?}) -> {} ({:?}) for {:?}",
-                            from_symbol.name,
-                            from_symbol.kind,
-                            to_symbol.name,
-                            to_symbol.kind,
-                            rel.kind
-                        );
-                        skipped_count += 1;
-                        if let Some((bar, _)) = &progress {
-                            bar.add_extra2(1);
-                        }
-                        continue;
-                    }
-
-                    // Check visibility (skip for Defines - a type can always see its own methods)
-                    if rel.kind != RelationKind::Defines {
-                        debug_print!(
-                            self,
-                            "Checking visibility: {} (vis: {:?}, module: {:?}) from {} (module: {:?})",
-                            to_symbol.name,
-                            to_symbol.visibility,
-                            to_symbol.module_path,
-                            from_symbol.name,
-                            from_symbol.module_path
-                        );
-                        if !Self::is_symbol_visible_from(&to_symbol, from_symbol) {
-                            debug_print!(
-                                self,
-                                "Symbol not visible: {} not visible from {}",
-                                to_symbol.name,
-                                from_symbol.name
-                            );
-                            skipped_count += 1;
-                            if let Some((bar, _)) = &progress {
-                                bar.add_extra2(1);
+                if let Some(to_id) = to_symbol_id {
+                    if let Some(to_symbol) = self.document_index.find_symbol_by_id(to_id)
+                        .map_err(|e| IndexError::TantivyError { operation: "find_symbol_by_id".to_string(), cause: e.to_string() })? {
+                        for from_symbol in &from_symbols {
+                            if Self::is_compatible_relationship(from_symbol.kind, to_symbol.kind, rel.kind) {
+                                let mut relationship = Relationship::new(rel.kind);
+                                if let Some(ref metadata) = rel.metadata {
+                                    relationship = relationship.with_metadata(metadata.clone());
+                                }
+                                self.add_relationship_internal(from_symbol.id, to_symbol.id, relationship)?;
+                                resolved_count += 1;
                             }
-                            continue;
                         }
-                    }
-
-                    // Add the relationship with preserved metadata
-                    debug_print!(
-                        self,
-                        "Adding relationship: {} -> {} (kind: {:?})",
-                        from_symbol.name,
-                        to_symbol.name,
-                        rel.kind
-                    );
-                    debug_print!(
-                        self,
-                        "Adding relationship: {} ({:?}) -> {} ({:?})",
-                        from_symbol.name,
-                        from_symbol.id,
-                        to_symbol.name,
-                        to_symbol.id
-                    );
-                    let mut relationship = Relationship::new(rel.kind);
-                    if let Some(ref metadata) = rel.metadata {
-                        relationship = relationship.with_metadata(metadata.clone());
-                    }
-                    self.add_relationship_internal(from_symbol.id, to_symbol.id, relationship)?;
-                    resolved_count += 1;
-                    if let Some((bar, _)) = &progress {
-                        bar.add_extra1(1);
                     }
                 }
             }
         }
 
-        // Commit the batch with all the relationships
+        // Commit the batch
         self.commit_tantivy_batch()?;
 
-        if let Some((bar, status)) = progress {
-            drop(status);
-            eprintln!("{bar}");
+        // Report cache effectiveness
+        let total_lookups = cache_hits + cache_misses;
+        if total_lookups > 0 {
+            let hit_rate = (cache_hits as f64 / total_lookups as f64) * 100.0;
+            eprintln!("[DEBUG:CACHE] Symbol cache hits: {}, misses: {}, hit rate: {:.1}%", cache_hits, cache_misses, hit_rate);
         }
 
-        debug_print!(
-            self,
-            "Relationship resolution complete - resolved: {}, skipped: {}, total: {}",
-            resolved_count,
-            skipped_count,
-            total_unresolved
-        );
-
+        eprintln!("[DEBUG:RESOLUTION] Resolution complete: {} relationships resolved", resolved_count);
         Ok(())
     }
 
